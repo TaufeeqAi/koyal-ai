@@ -1,0 +1,40 @@
+{
+  "tenant_id": "tenant_swiggy_support",
+  "company_name": "Swiggy",
+  "primary_language": "en-IN",
+  "supported_languages": [
+    "en-IN",
+    "hi-IN"
+  ],
+  "default_voice": "anushka",
+  "call_type": "inbound",
+  "cost_rates_inr": {
+    "stt_per_minute": 0.5,
+    "tts_per_1k_chars": 0.25,
+    "llm_per_1k_tokens": 0.1
+  },
+  "system_prompt_extras": "You are a customer support agent for Swiggy food delivery. Be empathetic about late or missing orders. Always offer to escalate if refund takes more than 24 hours.",
+  "escalation_message_hindi": "मैं आपकी समस्या को हमारी सीनियर टीम को भेज रहा हूँ। 24 घंटे में समाधान होगा।",
+  "escalation_message_english": "I am escalating your issue to our senior support team. You will hear back within 24 hours.",
+  "emergency_keywords_hindi": [
+    "खाना खराब",
+    "जहर",
+    "फूड पॉइजनिंग",
+    "बीमार पड़ गया",
+    "धोखाधड़ी"
+  ],
+  "emergency_keywords_english": [
+    "food poisoning",
+    "sick after eating",
+    "fraud",
+    "unsafe food",
+    "spoiled"
+  ],
+  "emergency_keywords_hinglish": [
+    "food kharab tha",
+    "bimar ho gaya",
+    "paisa kata nahi aaya",
+    "order nahi aaya"
+  ],
+  "qdrant_collection": "koyalai_tenant_swiggy_support"
+}

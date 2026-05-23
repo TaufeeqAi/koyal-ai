@@ -1,0 +1,42 @@
+{
+  "tenant_id": "tenant_hdfc_bank",
+  "company_name": "HDFC Bank",
+  "primary_language": "hi-IN",
+  "supported_languages": [
+    "hi-IN",
+    "en-IN"
+  ],
+  "default_voice": "meera",
+  "call_type": "both",
+  "cost_rates_inr": {
+    "stt_per_minute": 0.5,
+    "tts_per_1k_chars": 0.25,
+    "llm_per_1k_tokens": 0.1
+  },
+  "system_prompt_extras": "You are a customer service agent for HDFC Bank. Always address the customer respectfully. Use 'आप' (formal you) in Hindi. Never share account numbers or OTPs.",
+  "escalation_message_hindi": "मैं आपको हमारे वरिष्ठ अधिकारी से जोड़ रहा हूँ। कृपया लाइन पर रहें।",
+  "escalation_message_english": "I am connecting you to our senior officer. Please hold the line.",
+  "emergency_keywords_hindi": [
+    "आत्महत्या",
+    "मर जाऊँगा",
+    "धोखाधड़ी",
+    "खाता खाली",
+    "लूट",
+    "मदद करो"
+  ],
+  "emergency_keywords_english": [
+    "suicide",
+    "fraud",
+    "account hacked",
+    "stolen",
+    "emergency",
+    "help me"
+  ],
+  "emergency_keywords_hinglish": [
+    "account hack ho gaya",
+    "paise gaye",
+    "dhoka hua",
+    "mujhe bachaao"
+  ],
+  "qdrant_collection": "koyalai_tenant_hdfc_bank"
+}

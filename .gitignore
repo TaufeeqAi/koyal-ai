@@ -1,0 +1,6 @@
+.venv/
+.pytest_cache/
+temp.py
+checkpoints.py
+backend/__pycache__/
+backend/rag/__pycache__/
