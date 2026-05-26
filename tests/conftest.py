@@ -11,4 +11,3 @@ def pytest_addoption(parser):
 @pytest.fixture
 def run_slow(request):
     return request.config.getoption("--run-slow")
-

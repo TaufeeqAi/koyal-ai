@@ -1,0 +1,63 @@
+# ─────────────────────────────────────────────────────────────────────
+# Stage 1: dependency builder
+# ─────────────────────────────────────────────────────────────────────
+FROM python:3.11-slim AS builder
+
+WORKDIR /build
+
+# System deps for webrtcvad-wheels, soundfile, and git (for editable installs)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libsndfile1 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+# Pre-download ML models into builder image (~471MB LaBSE + ~80MB cross-encoder)
+# Eliminates cold-start model downloads in production pods
+ENV HF_HOME=/install/hf_cache
+RUN python -c "\
+from sentence_transformers import SentenceTransformer, CrossEncoder; \
+SentenceTransformer('sentence-transformers/LaBSE', device='cpu'); \
+CrossEncoder('cross-encoder/mmarco-mMiniLMv2-L12-H384-v1', device='cpu')"
+
+# ─────────────────────────────────────────────────────────────────────
+# Stage 2: runtime image (slim — no build tools)
+# ─────────────────────────────────────────────────────────────────────
+FROM python:3.11-slim AS runtime
+
+WORKDIR /app
+
+# Runtime-only system libraries
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libsndfile1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy installed packages + cached models from builder
+COPY --from=builder /install /usr/local
+ENV HF_HOME=/usr/local/hf_cache
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+
+# Non-root user (security best practice)
+RUN useradd -m -u 1001 koyalai
+USER koyalai
+
+COPY --chown=koyalai:koyalai backend/ ./backend/
+
+ENV UVICORN_HOST=0.0.0.0
+ENV UVICORN_PORT=8000
+ENV UVICORN_WORKERS=1
+
+EXPOSE 8000
+
+# exec form: signals (SIGTERM) delivered directly to uvicorn, not shell
+CMD ["uvicorn", "backend.main:app", \
+     "--host", "0.0.0.0", \
+     "--port", "8000", \
+     "--workers", "1", \
+     "--loop", "uvloop", \
+     "--ws", "websockets", \
+     "--log-level", "info"]

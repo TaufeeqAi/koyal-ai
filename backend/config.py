@@ -31,6 +31,8 @@ QDRANT_HOST: str = os.getenv("QDRANT_HOST", "localhost")
 QDRANT_PORT: int = int(os.getenv("QDRANT_PORT", "6333"))
 REDIS_HOST: str = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT: int = int(os.getenv("REDIS_PORT", "6379"))
+REDIS_DB: int = int(os.getenv("REDIS_DB", "0"))
+REDIS_DECODE_RESPONSES: bool = True
 
 # ── Language 
 DEFAULT_LANGUAGE: str = os.getenv("DEFAULT_LANGUAGE", "hi-IN")
@@ -42,6 +44,9 @@ SUPPORTED_LANGUAGES: list[str] = os.getenv(
 EMBEDDING_MODEL: str = "sentence-transformers/LaBSE"
 EMBEDDING_DIMENSION: int = 768
 EMBEDDING_BATCH_SIZE: int = 16  # CPU-safe default; override at runtime if needed
+
+# ── ReRanker 
+RERANKER_MODEL: str = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
 
 # ── Chunking 
 CHUNK_SIZE: int = 400
@@ -108,6 +113,56 @@ GUARDRAILS_CONFIG_PATH: Path = Path(
     os.getenv("GUARDRAILS_CONFIG_PATH", str(Path(__file__).parent / "safety" / "guardrails_config"))
 )
 GUARDRAILS_ENABLED: bool = os.getenv("GUARDRAILS_ENABLED", "true").lower() in ("true", "1", "yes")
+
+
+# ── STT 
+STT_MODEL: str = os.getenv("STT_MODEL", "saaras:v2")
+STT_TIMEOUT: int = int(os.getenv("STT_TIMEOUT", "15"))
+STT_MAX_RETRIES: int = int(os.getenv("STT_MAX_RETRIES", "3"))
+STT_BACKOFF_BASE: float = float(os.getenv("STT_BACKOFF_BASE", "2.0"))
+STT_CONFIDENCE_THRESHOLD: float = float(os.getenv("STT_CONFIDENCE_THRESHOLD", "0.4"))
+
+# ── TTS 
+TTS_MODEL: str = os.getenv("TTS_MODEL", "bulbul:v1")
+TTS_TIMEOUT: int = int(os.getenv("TTS_TIMEOUT", "10"))
+TTS_MAX_RETRIES: int = int(os.getenv("TTS_MAX_RETRIES", "3"))
+TTS_BACKOFF_BASE: float = float(os.getenv("TTS_BACKOFF_BASE", "2.0"))
+TTS_PACE: float = float(os.getenv("TTS_PACE", "1.0"))
+TTS_SAMPLE_RATE: int = int(os.getenv("TTS_SAMPLE_RATE", "16000"))
+TTS_MAX_CHARS_PER_CHUNK: int = int(os.getenv("TTS_MAX_CHARS_PER_CHUNK", "500"))
+
+# ── VAD 
+VAD_AGGRESSIVENESS: int = int(os.getenv("VAD_AGGRESSIVENESS", "2"))
+# 0=permissive → 3=aggressive. 2 recommended for telephony.
+VAD_SAMPLE_RATE: int = int(os.getenv("VAD_SAMPLE_RATE", "16000"))
+VAD_FRAME_DURATION_MS: int = int(os.getenv("VAD_FRAME_DURATION_MS", "30"))
+# WebRTC VAD accepts: 10ms, 20ms, or 30ms frames only.
+VAD_SPEECH_THRESHOLD: int = int(os.getenv("VAD_SPEECH_THRESHOLD", "8"))
+# Consecutive voiced frames before declaring speech start.
+VAD_SILENCE_THRESHOLD: int = int(os.getenv("VAD_SILENCE_THRESHOLD", "25"))
+# Consecutive silent frames before declaring utterance end (25 × 30ms = 750ms).
+VAD_MIN_SPEECH_FRAMES: int = int(os.getenv("VAD_MIN_SPEECH_FRAMES", "5"))
+# Minimum voiced frames to count as utterance (filters noise bursts).
+VAD_ENERGY_THRESHOLD: float = float(os.getenv("VAD_ENERGY_THRESHOLD", "200.0"))
+# RMS energy below this → forced silence (energy guard secondary to webrtcvad).
+
+# ── Session 
+SESSION_TIMEOUT_SECONDS: int = int(os.getenv("SESSION_TIMEOUT_SECONDS", "300"))
+MAX_CONCURRENT_SESSIONS: int = int(os.getenv("MAX_CONCURRENT_SESSIONS", "100"))
+
+# ── Outbound 
+OUTBOUND_MAX_CONCURRENT: int = int(os.getenv("OUTBOUND_MAX_CONCURRENT", "5"))
+
+# ── Cost rates (₹) 
+STT_COST_PER_MINUTE: float = float(os.getenv("STT_COST_PER_MINUTE", "0.50"))
+TTS_COST_PER_CHAR: float = float(os.getenv("TTS_COST_PER_CHAR", "0.0015"))
+LLM_COST_PER_TOKEN: float = float(os.getenv("LLM_COST_PER_TOKEN", "0.0"))
+COST_KEY_TTL_DAYS: int = int(os.getenv("COST_KEY_TTL_DAYS", "30"))
+
+# ── WebSocket 
+WS_RECEIVE_TIMEOUT: float = float(os.getenv("WS_RECEIVE_TIMEOUT", "0.1"))
+WS_GREETING_ENABLED: bool = os.getenv("WS_GREETING_ENABLED", "true").lower() == "true"
+
 
 
 def load_tenant_config(tenant_id: str) -> dict:

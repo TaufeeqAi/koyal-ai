@@ -1,10 +1,14 @@
 .venv/
+.env
 .pytest_cache/
 temp.py
 checkpoints.py
+backend/metrics.py
+commitmsg.txt
 
 backend/__pycache__/
 backend/rag/__pycache__/
 backend/agents/__pycache__/
 tests/__pycache__/
 backend/safety/__pycache__/
+backend/voice/__pycache__/

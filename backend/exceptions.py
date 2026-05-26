@@ -65,3 +65,30 @@ class EmergencyDetectionError(KoyalAIError):
 
 class GuardrailsError(KoyalAIError):
     """Raised when guardrails processing encounters an unrecoverable error."""
+
+
+# ──  Voice / Telephony Errors 
+
+class VoiceError(KoyalAIError):
+    """Base class for voice pipeline errors."""
+
+class STTError(VoiceError):
+    """Speech-to-text transcription failed (non-retryable)."""
+
+class LowConfidenceError(VoiceError):
+    """STT confidence below threshold; caller should repeat."""
+
+class TTSError(VoiceError):
+    """Text-to-speech synthesis failed (non-retryable)."""
+
+class VADError(VoiceError):
+    """Voice activity detection error (invalid frame size, sample rate, etc.)."""
+
+class SessionError(VoiceError):
+    """Session lifecycle error (not found, already ended, duplicate)."""
+
+class OutboundError(VoiceError):
+    """Outbound calling campaign error."""
+
+class AudioFormatError(VoiceError):
+    """Audio data format is invalid or unsupported."""
