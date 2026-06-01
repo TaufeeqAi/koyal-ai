@@ -12,3 +12,4 @@ backend/agents/__pycache__/
 tests/__pycache__/
 backend/safety/__pycache__/
 backend/voice/__pycache__/
+backend/observability/__pycache__

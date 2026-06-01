@@ -10,7 +10,7 @@ Design decisions
 * Tenant persona — each tenant's ``system_prompt_extras`` is appended to
   the base system prompt (loaded from config.json at runtime).
 * Token tracking — ``usage_metadata`` from the response is stored in
-  state for cost accounting in Phase 4.
+  state for cost accounting.
 
 Retry policy:
     Groq calls retry up to AGENT_MAX_RETRIES times with exponential
@@ -28,7 +28,7 @@ Usage example:
 """
 
 from __future__ import annotations
-
+import backend.groq_patch
 import logging
 import time
 from typing import Optional
@@ -169,7 +169,7 @@ def response_agent(state: AgentState) -> dict:
             }
 
         except GroqAPIError:
-            raise  # Don't retry configuration errors
+            raise  
 
         except Exception as exc:
             last_error = exc

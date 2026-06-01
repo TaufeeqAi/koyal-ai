@@ -1,0 +1,240 @@
+{
+  "__inputs": [],
+  "__requires": [
+    { "type": "grafana", "id": "grafana", "name": "Grafana", "version": "11.6.0" },
+    { "type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0" },
+    { "type": "panel", "id": "gauge", "name": "Gauge", "version": "" },
+    { "type": "panel", "id": "stat", "name": "Stat", "version": "" },
+    { "type": "panel", "id": "timeseries", "name": "Time series", "version": "" },
+    { "type": "panel", "id": "piechart", "name": "Pie chart", "version": "" },
+    { "type": "panel", "id": "table", "name": "Table", "version": "" }
+  ],
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1, "datasource": "-- Grafana --", "enable": true,
+        "hide": true, "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts", "type": "dashboard"
+      }
+    ]
+  },
+  "description": "KoyalAI Multilingual Voice AI Platform — Real-time observability dashboard",
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "id": 1, "title": "🟢 Active Calls", "type": "gauge",
+      "gridPos": { "h": 6, "w": 4, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "koyalai_prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null }, { "color": "yellow", "value": 5 }, { "color": "red", "value": 20 }
+          ]},
+          "unit": "short", "min": 0, "max": 50
+        }, "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "auto", "showThresholdLabels": false, "showThresholdMarkers": true },
+      "targets": [{ "expr": "sum(koyal_active_calls{tenant_id=~\"$tenant_id\"})", "legendFormat": "Active Calls", "refId": "A", "instant": true, "datasource": { "type": "prometheus", "uid": "koyalai_prometheus" } }]
+    },
+    {
+      "id": 2, "title": "📞 Calls / min", "type": "stat",
+      "gridPos": { "h": 6, "w": 4, "x": 4, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "koyalai_prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null }, { "color": "yellow", "value": 10 }, { "color": "red", "value": 30 }
+          ]},
+          "unit": "short", "decimals": 1
+        }, "overrides": []
+      },
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [{ "expr": "sum(rate(koyal_calls_total{tenant_id=~\"$tenant_id\"}[5m])) * 60", "legendFormat": "calls/min", "refId": "A", "datasource": { "type": "prometheus", "uid": "koyalai_prometheus" } }]
+    },
+    {
+      "id": 3, "title": "⚡ STT Latency P95 (ms)", "type": "gauge",
+      "gridPos": { "h": 6, "w": 4, "x": 8, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "koyalai_prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null }, { "color": "yellow", "value": 500 }, { "color": "red", "value": 1000 }
+          ]},
+          "unit": "ms", "min": 0, "max": 2000
+        }, "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "auto", "showThresholdLabels": false, "showThresholdMarkers": true },
+      "targets": [{ "expr": "histogram_quantile(0.95, sum(rate(koyal_stt_latency_ms_bucket{tenant_id=~\"$tenant_id\"}[5m])) by (le))", "legendFormat": "P95 STT", "refId": "A", "datasource": { "type": "prometheus", "uid": "koyalai_prometheus" } }]
+    },
+    {
+      "id": 4, "title": "🎯 TTFR P95 (ms)", "type": "gauge",
+      "gridPos": { "h": 6, "w": 4, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "koyalai_prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null }, { "color": "yellow", "value": 1000 }, { "color": "red", "value": 2000 }
+          ]},
+          "unit": "ms", "min": 0, "max": 4000
+        }, "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "auto", "showThresholdLabels": false, "showThresholdMarkers": true },
+      "targets": [{ "expr": "histogram_quantile(0.95, sum(rate(koyal_ttfr_ms_bucket{tenant_id=~\"$tenant_id\"}[5m])) by (le))", "legendFormat": "P95 TTFR", "refId": "A", "datasource": { "type": "prometheus", "uid": "koyalai_prometheus" } }]
+    },
+    {
+      "id": 5, "title": "🚨 Emergency Escalations (24h)", "type": "stat",
+      "gridPos": { "h": 6, "w": 4, "x": 16, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "koyalai_prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null }, { "color": "yellow", "value": 1 }, { "color": "red", "value": 5 }
+          ]},
+          "unit": "short"
+        }, "overrides": []
+      },
+      "options": { "colorMode": "value", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [{ "expr": "sum(increase(koyal_emergency_escalations_total{tenant_id=~\"$tenant_id\"}[24h]))", "legendFormat": "Escalations (24h)", "refId": "A", "datasource": { "type": "prometheus", "uid": "koyalai_prometheus" } }]
+    },
+    {
+      "id": 6, "title": "💰 Total Cost Today (₹)", "type": "stat",
+      "gridPos": { "h": 6, "w": 4, "x": 20, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "koyalai_prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null }, { "color": "yellow", "value": 500 }, { "color": "red", "value": 2000 }
+          ]},
+          "unit": "currencyINR", "decimals": 2
+        }, "overrides": []
+      },
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [{ "expr": "sum(increase(koyal_cost_inr_total{tenant_id=~\"$tenant_id\"}[24h]))", "legendFormat": "Total ₹ (24h)", "refId": "A", "datasource": { "type": "prometheus", "uid": "koyalai_prometheus" } }]
+    },
+    {
+      "id": 7, "title": "📈 Calls Over Time by Tenant", "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "koyalai_prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 2, "fillOpacity": 10 }, "unit": "short" }, "overrides": []
+      },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [{ "expr": "sum by (tenant_id, outcome) (rate(koyal_calls_total{tenant_id=~\"$tenant_id\"}[5m])) * 60", "legendFormat": "{{tenant_id}} / {{outcome}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "koyalai_prometheus" } }]
+    },
+    {
+      "id": 8, "title": "🌐 Language Distribution", "type": "piechart",
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "koyalai_prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "short" }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false }, "pieType": "donut", "tooltip": { "mode": "single" }, "legend": { "displayMode": "list", "placement": "right" } },
+      "targets": [{ "expr": "sum by (language) (increase(koyal_language_detections_total{tenant_id=~\"$tenant_id\"}[1h]))", "legendFormat": "{{language}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "koyalai_prometheus" } }]
+    },
+    {
+      "id": 9, "title": "🛡️ Safety Gate Decisions", "type": "timeseries",
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "koyalai_prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "lineWidth": 2, "fillOpacity": 15 }, "unit": "short" },
+        "overrides": [{ "matcher": { "id": "byName", "options": "escalated" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] }]
+      },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [{ "expr": "sum by (decision) (rate(koyal_safety_gate_decisions_total{tenant_id=~\"$tenant_id\"}[5m])) * 60", "legendFormat": "{{decision}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "koyalai_prometheus" } }]
+    },
+    {
+      "id": 10, "title": "⏱️ Latency P50/P95 — STT + TTS by Language", "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "koyalai_prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 2, "fillOpacity": 5 }, "unit": "ms" }, "overrides": [] },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(koyal_stt_latency_ms_bucket{tenant_id=~\"$tenant_id\"}[5m])) by (le, language))", "legendFormat": "STT P50 {{language}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "koyalai_prometheus" } },
+        { "expr": "histogram_quantile(0.95, sum(rate(koyal_stt_latency_ms_bucket{tenant_id=~\"$tenant_id\"}[5m])) by (le, language))", "legendFormat": "STT P95 {{language}}", "refId": "B", "datasource": { "type": "prometheus", "uid": "koyalai_prometheus" } },
+        { "expr": "histogram_quantile(0.50, sum(rate(koyal_tts_latency_ms_bucket{tenant_id=~\"$tenant_id\"}[5m])) by (le, language))", "legendFormat": "TTS P50 {{language}}", "refId": "C", "datasource": { "type": "prometheus", "uid": "koyalai_prometheus" } },
+        { "expr": "histogram_quantile(0.95, sum(rate(koyal_tts_latency_ms_bucket{tenant_id=~\"$tenant_id\"}[5m])) by (le, language))", "legendFormat": "TTS P95 {{language}}", "refId": "D", "datasource": { "type": "prometheus", "uid": "koyalai_prometheus" } }
+      ]
+    },
+    {
+      "id": 11, "title": "💰 ₹ Cost Rate by Tenant + Service", "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "koyalai_prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 2, "fillOpacity": 10 }, "unit": "currencyINR", "decimals": 4 }, "overrides": [] },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [{ "expr": "sum by (tenant_id, cost_type) (rate(koyal_cost_inr_total{tenant_id=~\"$tenant_id\"}[5m])) * 60", "legendFormat": "{{tenant_id}} / {{cost_type}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "koyalai_prometheus" } }]
+    },
+    {
+      "id": 12, "title": "🎤 ASR Confidence by Language", "type": "timeseries",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 22 },
+      "datasource": { "type": "prometheus", "uid": "koyalai_prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 2, "fillOpacity": 10 }, "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        { "expr": "koyal_asr_confidence{tenant_id=~\"$tenant_id\"}", "legendFormat": "{{tenant_id}} / {{language}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "koyalai_prometheus" } }
+      ]
+    },
+    {
+      "id": 13, "title": "📚 RAG Retrieval Relevance Score", "type": "timeseries",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 22 },
+      "datasource": { "type": "prometheus", "uid": "koyalai_prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 2, "fillOpacity": 8 }, "unit": "short", "min": 0, "max": 1,
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "yellow", "value": 0.6 }, { "color": "green", "value": 0.8 }]}
+        }, "overrides": []
+      },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [{ "expr": "histogram_quantile(0.50, sum(rate(koyal_retrieval_relevance_score_bucket{tenant_id=~\"$tenant_id\"}[10m])) by (le, tenant_id))", "legendFormat": "Relevance P50 {{tenant_id}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "koyalai_prometheus" } }]
+    },
+    {
+      "id": 14, "title": "✅ RAGAS Faithfulness Score (Phase 5 Eval)", "type": "gauge",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 22 },
+      "datasource": { "type": "prometheus", "uid": "koyalai_prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "yellow", "value": 0.7 }, { "color": "green", "value": 0.82 }]},
+          "unit": "percentunit", "min": 0, "max": 1, "decimals": 3
+        }, "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "auto", "showThresholdLabels": true, "showThresholdMarkers": true },
+      "targets": [{ "expr": "koyal_ragas_faithfulness{tenant_id=~\"$tenant_id\"}", "legendFormat": "{{tenant_id}} / {{language}}", "refId": "A", "instant": true, "datasource": { "type": "prometheus", "uid": "koyalai_prometheus" } }]
+    }
+  ],
+  "refresh": "15s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["koyalai", "voice", "ai", "observability"],
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": true, "text": "All", "value": "$__all" },
+        "datasource": { "type": "prometheus", "uid": "koyalai_prometheus" },
+        "definition": "label_values(koyal_calls_total, tenant_id)",
+        "hide": 0,
+        "includeAll": true,
+        "multi": false,
+        "name": "tenant_id",
+        "options": [],
+        "query": { "query": "label_values(koyal_calls_total, tenant_id)", "refId": "StandardVariableQuery" },
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "type": "query",
+        "label": "Tenant"
+      }
+    ]
+  },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "🐦 KoyalAI Voice Platform — Observability",
+  "uid": "koyalai-phase4-v1",
+  "version": 1
+}

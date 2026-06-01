@@ -48,6 +48,16 @@ EMBEDDING_BATCH_SIZE: int = 16  # CPU-safe default; override at runtime if neede
 # ── ReRanker 
 RERANKER_MODEL: str = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
 
+# ── Qdrant
+QDRANT_TIMEOUT: int = int(os.getenv("QDRANT_TIMEOUT", "20"))
+QDRANT_QUERY_MAX_RETRIES: int = int(
+    os.getenv("QDRANT_QUERY_MAX_RETRIES", "3")
+)
+
+QDRANT_QUERY_BACKOFF_SECONDS: float = float(
+    os.getenv("QDRANT_QUERY_BACKOFF_SECONDS", "0.5")
+)
+
 # ── Chunking 
 CHUNK_SIZE: int = 400
 CHUNK_OVERLAP: int = 40
@@ -158,6 +168,7 @@ STT_COST_PER_MINUTE: float = float(os.getenv("STT_COST_PER_MINUTE", "0.50"))
 TTS_COST_PER_CHAR: float = float(os.getenv("TTS_COST_PER_CHAR", "0.0015"))
 LLM_COST_PER_TOKEN: float = float(os.getenv("LLM_COST_PER_TOKEN", "0.0"))
 COST_KEY_TTL_DAYS: int = int(os.getenv("COST_KEY_TTL_DAYS", "30"))
+STT_COST_PER_SECOND = STT_COST_PER_MINUTE / 60.0
 
 # ── WebSocket 
 WS_RECEIVE_TIMEOUT: float = float(os.getenv("WS_RECEIVE_TIMEOUT", "0.1"))
@@ -209,14 +220,14 @@ def validate_runtime_config() -> None:
     """Check that all required secrets are present at startup.
 
     Raises:
-        ConfigValidationError: If GROQ_API_KEY is absent (required for Phase 2).
+        ConfigValidationError: If GROQ_API_KEY is absent.
 
     Example:
         >>> validate_runtime_config()   # raises if GROQ_API_KEY unset
     """
     errors: list[str] = []
     if not GROQ_API_KEY:
-        errors.append("GROQ_API_KEY is not set — required for Phase 2 LLM calls.")
+        errors.append("GROQ_API_KEY is not set — required for LLM calls.")
     if not SARVAM_API_KEY:
         # Warn rather than error — script analysis still works without it
         logger.warning(

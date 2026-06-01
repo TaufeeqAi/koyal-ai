@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Optional
 
 import redis
 import redis.asyncio as aioredis
@@ -16,10 +16,21 @@ from backend.config import (
     STT_COST_PER_MINUTE,
     TTS_COST_PER_CHAR,
 )
+from backend.observability.prometheus_metrics import METRICS
 
 logger = logging.getLogger(__name__)
 
+_cost_tracker: Optional[CostTracker] = None
+
 _COST_KEY_TTL_SECONDS: int = COST_KEY_TTL_DAYS * 86_400
+
+
+def get_cost_tracker() -> CostTracker:
+    """Return the singleton CostTracker instance (create once)."""
+    global _cost_tracker
+    if _cost_tracker is None:
+        _cost_tracker = CostTracker()
+    return _cost_tracker
 
 
 def _key(tenant_id: str, metric: str) -> str:
@@ -42,7 +53,6 @@ class CostTracker:
         redis_port: Redis port. Defaults to ``REDIS_PORT`` from config.
 
     Example:
-        >>> tracker = CostTracker()
         >>> await tracker.track_stt("tenant_hdfc_bank", seconds=4.2)
         >>> costs = tracker.get_tenant_costs("tenant_hdfc_bank")
         >>> costs["stt_cost_inr"]
@@ -88,6 +98,7 @@ class CostTracker:
         if seconds <= 0:
             return
         cost_inr = (seconds / 60.0) * STT_COST_PER_MINUTE
+        METRICS.cost_inr.labels(tenant_id=tenant_id, cost_type="stt").inc(cost_inr)
         try:
             pipe = self._async_redis.pipeline()
             pipe.incrbyfloat(_key(tenant_id, "stt_inr"), cost_inr)
@@ -99,7 +110,6 @@ class CostTracker:
                 "track_stt tenant=%s seconds=%.2f cost_inr=%.4f",
                 tenant_id, seconds, cost_inr,
             )
-            # obs: COST_INR_TOTAL.labels(tenant_id=tenant_id, service="stt").inc(cost_inr)
         except Exception as exc:
             logger.error("CostTracker.track_stt failed (silent): %s", exc)
 
@@ -113,6 +123,7 @@ class CostTracker:
         if chars <= 0:
             return
         cost_inr = chars * TTS_COST_PER_CHAR
+        METRICS.cost_inr.labels(tenant_id=tenant_id, cost_type="tts").inc(cost_inr)
         try:
             pipe = self._async_redis.pipeline()
             pipe.incrbyfloat(_key(tenant_id, "tts_inr"), cost_inr)
@@ -123,8 +134,7 @@ class CostTracker:
             logger.debug(
                 "track_tts tenant=%s chars=%d cost_inr=%.4f",
                 tenant_id, chars, cost_inr,
-            )
-            # obs: COST_INR_TOTAL.labels(tenant_id=tenant_id, service="tts").inc(cost_inr)
+            )   
         except Exception as exc:
             logger.error("CostTracker.track_tts failed (silent): %s", exc)
 
@@ -197,7 +207,45 @@ class CostTracker:
             "calls_completed": int(_get("calls_completed")),
             "calls_escalated": int(_get("calls_escalated")),
             "calls_failed": int(_get("calls_failed")),
+            "calls_terminated": int(_get("calls_terminated")),
         }
+
+
+    def sync_gauges(self, tenant_ids: list[str]) -> None:
+        """Sync Redis cost totals to Prometheus gauges for each tenant.
+        This method is called by the background task in main.py every 30 seconds.
+        It reads current Redis cost values (using the sync Redis client) and pushes
+        them into the `koyal_cost_inr_current` Prometheus gauge.
+
+        The gauge labels:
+            - tenant_id
+            - cost_type (stt, tts, total)
+
+        Args:
+            tenant_ids: List of tenant identifiers to sync (e.g., TENANTS from config).
+        """
+        try:
+            from backend.observability.prometheus_metrics import METRICS
+        except ImportError:
+            logger.warning("sync_gauges: prometheus_metrics not available - skipping")
+            return
+        
+        for tenant_id in tenant_ids:
+            try:
+                costs = self.get_tenant_costs(tenant_id)
+                stt_cost = costs["stt_cost_inr"]
+                tts_cost = costs["tts_cost_inr"]
+                total_cost = costs["total_cost_inr"]
+
+                METRICS.cost_inr_current.labels(tenant_id=tenant_id, cost_type="stt").set(stt_cost)
+                METRICS.cost_inr_current.labels(tenant_id=tenant_id, cost_type="tts").set(tts_cost)
+                METRICS.cost_inr_current.labels(tenant_id=tenant_id, cost_type="total").set(total_cost)
+
+                logger.debug("sync_gauges: tenant=%s stt=%.2f tts=%.2f total=%.2f",
+                            tenant_id, stt_cost, tts_cost, total_cost)
+                
+            except Exception as e:
+                logger.error("sync_gauges failed for tenant %s: %s", tenant_id, e)
 
     def reset_tenant_costs(self, tenant_id: str) -> None:
         """Delete all cost keys for a tenant (admin / billing-period reset). IRREVERSIBLE."""

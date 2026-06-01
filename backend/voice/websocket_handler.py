@@ -1,45 +1,3 @@
-"""
-Full-duplex async voice loop: PCM → VAD → STT → LangGraph → TTS → audio.
-
-Per-turn pipeline
-─────────────────
-1. Receive binary PCM frames via WebSocket (client → server)
-2. SpeechSegmenter accumulates frames → speech segment when utterance ends
-3. SarvamSTT.atranscribe()           → transcript + detected language
-4. AgentState built from transcript + session context + harmful_attempt_count
-5. koyal_graph.ainvoke(state)        → final_response in caller's language
-6. Guardrails post-processing:
-     - Persist updated strike count to Redis
-     - Check end_session → terminate WebSocket (3rd strike)
-     - Check wait_for_next_input → speak warning, loop back (1st/2nd strike)
-7. SarvamTTS.asynthesize_streaming() → yield audio chunks per sentence
-8. websocket.send_bytes(audio_chunk) per sentence (streaming)
-9. Update session: state, language, usage counters
-10. CostTracker.track_*()            → Redis atomic writes
-
-Control messages (JSON text frames)
-────────────────────────────────────
-  {"type": "config", "language": "hi-IN"}   — override detected language
-  {"type": "flush"}                          — force-flush VAD buffer → STT
-  {"type": "end"}                            — graceful call termination
-
-Interruption detection
-──────────────────────
-When binary audio arrives while TTS is streaming (_is_speaking=True),
-_cancel_speaking() is called and TTS stream is abandoned. This enables
-natural barge-in / interruption behaviour without waiting for the full
-TTS response to complete.
-
-Guardrails 3-strike integration
-─────────────────────────────
-* harmful_attempt_count is loaded from Redis per-turn (cross-worker safety)
-* Passed to AgentState for graph routing decisions
-* Updated count is persisted back to Redis after graph invocation
-* 1st/2nd strike: warning spoken, session continues (wait_for_next_input)
-* 3rd strike: termination message spoken, WebSocket closed (end_session)
-* Emergency escalation bypasses strike system entirely (safety_gate authority)
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -50,15 +8,18 @@ from typing import Optional
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from backend.agents.graph import koyal_graph
-from backend.agents.state import AgentState
 from backend.config import DEFAULT_LANGUAGE, WS_GREETING_ENABLED, load_tenant_config
-from backend.cost_tracker import CostTracker
+from backend.cost_tracker import get_cost_tracker
 from backend.exceptions import LowConfidenceError, SessionError, STTError, TTSError
 from backend.voice.session_manager import SessionState, get_session_manager
 from backend.voice.stt import SarvamSTT
 from backend.voice.tts import SarvamTTS
 from backend.voice.vad import SpeechSegmenter
+from backend.observability.prometheus_metrics import record_call_start
+from backend.observability.instrumented_graph import (
+    observed_invoke_graph,
+    observed_call_lifecycle,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +66,7 @@ class WebSocketVoiceHandler:
         self._stt = SarvamSTT()
         self._tts = SarvamTTS()
         self._segmenter = SpeechSegmenter()
-        self._cost_tracker = CostTracker()
+        self._cost_tracker =  get_cost_tracker()
         self._session_manager = get_session_manager()
 
         self._detected_language: str = DEFAULT_LANGUAGE
@@ -113,9 +74,12 @@ class WebSocketVoiceHandler:
         self._interrupted: bool = False
         self._speaking_task: Optional[asyncio.Task] = None
 
+        self._session_start_time = 0.0
+
     async def run(self) -> None:
         """Accept WebSocket, create session, run voice loop, clean up on exit."""
         await self._ws.accept()
+        self._session_start_time = time.perf_counter()
 
         try:
             session = await self._session_manager.create_session(
@@ -126,6 +90,8 @@ class WebSocketVoiceHandler:
             await self._send_error(str(exc))
             await self._ws.close(code=4009)
             return
+        
+        record_call_start(self._tenant_id, DEFAULT_LANGUAGE, self._call_type)
 
         if WS_GREETING_ENABLED:
             await self._send_greeting()
@@ -175,7 +141,7 @@ class WebSocketVoiceHandler:
         """Run one complete STT → LangGraph → TTS turn with guardrails
         3-strike post-processing.
         """
-        turn_start = time.monotonic()
+        turn_start = time.perf_counter()
         await self._session_manager.update_session(
             self._session_id, state=SessionState.PROCESSING
         )
@@ -183,24 +149,27 @@ class WebSocketVoiceHandler:
 
         # ── STT 
         try:
-            stt_start = time.monotonic()
+            stt_start = time.perf_counter()
             stt_result = await self._stt.atranscribe(
                 speech_bytes, language_hint=self._detected_language
             )
-            stt_latency_ms = (time.monotonic() - stt_start) * 1000
-            # obs: STT_LATENCY_MS.labels(tenant_id=self._tenant_id).observe(stt_latency_ms)
+            stt_latency_ms = (time.perf_counter() - stt_start) * 1000
         except LowConfidenceError as exc:
             logger.warning("[%s] Low STT confidence: %.2f", self._session_id, exc.context.get("confidence", 0))
             await self._speak_response(
                 _FALLBACK_TEXT.get(self._detected_language, _DEFAULT_FALLBACK),
                 self._detected_language,
             )
+            await self._session_manager.update_session(
+                self._session_id,
+                state=SessionState.LISTENING
+            )
+            await self._send_status("listening")
             return
         except STTError as exc:
             logger.error("[%s] STT failed: %s", self._session_id, exc)
             await self._send_error("Speech recognition failed. Please try again.")
             await self._send_status("listening")
-            # obs: STT_ERRORS_TOTAL.labels(tenant_id=self._tenant_id, reason="http_error").inc()
             return
         except Exception as exc:
             logger.error("[%s] STT unexpected error: %s", self._session_id, exc)
@@ -242,17 +211,18 @@ class WebSocketVoiceHandler:
                 )
                 sess.harmful_attempt_count = current_strikes
 
-        # ── LangGraph 
-        initial_state = AgentState(
-            query=transcript,
-            tenant_id=self._tenant_id,
-            detected_language=detected_lang,
-            session_id=self._session_id,
-            harmful_attempt_count=current_strikes,
-        )
-
         try:
-            agent_result: dict = await koyal_graph.ainvoke(initial_state)
+            agent_result: dict = await observed_invoke_graph(
+                query=transcript,
+                tenant_id=self._tenant_id,
+                session_id=self._session_id,
+                call_type=self._call_type,
+                stt_latency_ms=stt_latency_ms,
+                stt_confidence=stt_result.get("confidence", 0.85),
+                stt_duration_seconds=stt_seconds,
+                harmful_attempt_count=current_strikes,
+                call_start_time=turn_start,
+            )
         except Exception as exc:
             logger.error("[%s] LangGraph failed: %s", self._session_id, exc)
             await self._speak_response(
@@ -294,13 +264,12 @@ class WebSocketVoiceHandler:
             await self._session_manager.update_session(
                 self._session_id, state=SessionState.ENDED, outcome="terminated"
             )
-            await self._cost_tracker.track_call(self._tenant_id, outcome="terminated")
-            # obs: CALLS_TOTAL.labels(..., outcome="terminated").inc()
 
             logger.warning(
                 "[%s] Session terminated by 3-strike policy. Strikes=%d",
                 self._session_id, updated_strikes,
             )
+            await self._ws.close(code=1008)
             raise WebSocketDisconnect()
 
         # ── Handle 1st/2nd strike: warning, skip normal pipeline 
@@ -350,27 +319,29 @@ class WebSocketVoiceHandler:
             await self._session_manager.update_session(
                 self._session_id, state=SessionState.ESCALATED, outcome="escalated"
             )
-            await self._cost_tracker.track_call(self._tenant_id, outcome="escalated")
 
         # ── TTS 
         await self._session_manager.update_session(
             self._session_id, state=SessionState.SPEAKING
         )
         await self._send_status("speaking")
-        await self._speak_response(final_response, response_lang)
+        tts_ok = await self._speak_response(final_response, response_lang)
 
-        tts_chars = len(final_response)
-        await self._cost_tracker.track_tts(self._tenant_id, tts_chars)
-        async with self._session_manager.acquire(self._session_id) as sess:
-            sess.tts_chars += tts_chars
-            sess.turn_count += 1
+        turn_latency_ms = (time.perf_counter() - turn_start) * 1000
+        
+        if tts_ok:
+            tts_chars = len(final_response)
+            await self._cost_tracker.track_tts(self._tenant_id, tts_chars)
+            async with self._session_manager.acquire(self._session_id) as sess:
+                sess.tts_chars += tts_chars
+                sess.turn_count += 1
+        else:
+            logger.warning("[%s] TTS failed - turn not counted, no TTS billing", self._session_id)
 
-        turn_latency_ms = (time.monotonic() - turn_start) * 1000
         logger.info(
             "[%s] Turn complete: lang=%s latency=%.0fms escalated=%s strikes=%d",
             self._session_id, response_lang, turn_latency_ms, is_escalation, updated_strikes,
         )
-        # obs: TURN_LATENCY_MS.labels(tenant_id=self._tenant_id).observe(turn_latency_ms)
 
         if is_escalation:
             await self._session_manager.end_session(self._session_id, outcome="escalated")
@@ -381,12 +352,14 @@ class WebSocketVoiceHandler:
         )
         await self._send_status("listening")
 
-    async def _speak_response(self, text: str, language_code: str) -> None:
+    async def _speak_response(self, text: str, language_code: str) -> bool:
         """Stream TTS audio to the client, sentence by sentence."""
         self._is_speaking = True
         self._interrupted = False
+        success = True
 
         async def _stream() -> None:
+            nonlocal success
             try:
                 async for audio_chunk in self._tts.asynthesize_streaming(text, language_code):
                     if self._interrupted:
@@ -398,14 +371,19 @@ class WebSocketVoiceHandler:
                         raise
                     except Exception as exc:
                         logger.debug("[%s] send_bytes error: %s", self._session_id, exc)
+            
+            except asyncio.CancelledError:
+                logger.debug("[%s] TTS stream cancelled", self._session_id)
+                raise   
             except TTSError as exc:
                 logger.error("[%s] TTS error: %s", self._session_id, exc)
-                # obs: TTS_ERRORS_TOTAL.labels(...).inc()
+                success = False
             finally:
                 self._is_speaking = False
 
         self._speaking_task = asyncio.ensure_future(_stream())
         await self._speaking_task
+        return success
 
     async def _cancel_speaking(self) -> None:
         """Signal barge-in interruption and cancel the TTS stream."""
@@ -495,14 +473,18 @@ class WebSocketVoiceHandler:
         """End session and flush costs on any exit path."""
         try:
             session = await self._session_manager.get_session(self._session_id)
+            outcome = session.outcome or "completed"
             if session.is_active:
-                # Determine outcome: terminated takes precedence
-                outcome = session.outcome or "completed"
-                await self._session_manager.end_session(
-                    self._session_id, outcome=outcome
-                )
-                await self._cost_tracker.track_call(self._tenant_id, outcome=outcome)
-                # obs: CALLS_TOTAL.labels(tenant_id=self._tenant_id, outcome=outcome).inc()
+                await self._session_manager.end_session(self._session_id, outcome=outcome)
+            await observed_call_lifecycle(
+                tenant_id=self._tenant_id,
+                session_id=self._session_id,
+                language=session.language or self._detected_language,
+                call_type=self._call_type,
+                duration_seconds=time.perf_counter() - self._session_start_time,
+                outcome=outcome,
+            )
+            await self._cost_tracker.track_call(self._tenant_id, outcome=outcome)
         except SessionError:
             pass
         except Exception as exc:

@@ -58,6 +58,8 @@ from backend.exceptions import (
     KoyalAIError,
 )
 
+import backend.groq_patch
+
 logger = logging.getLogger(__name__)
 
 # ── Constants 

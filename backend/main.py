@@ -1,25 +1,8 @@
-"""
-Endpoints
-─────────
-  WebSocket  /ws/{tenant_id}/{session_id}     — full-duplex voice call
-  POST       /api/outbound/campaign           — outbound call campaign
-  GET        /api/costs/{tenant_id}           — ₹ cost breakdown (sync Redis read)
-  GET        /api/sessions                    — active sessions
-  GET        /api/sessions/{session_id}       — single session state
-  GET        /health                          — liveness + Redis check
-  GET        /metrics                         — Prometheus stub (Phase 4 replaces)
-
-Startup lifecycle
-─────────────────
-  1. validate_runtime_config() — raises on missing GROQ_API_KEY
-  2. Redis ping — warns if unreachable (cost tracking degraded, not fatal)
-  3. Log configured tenants
-"""
-
 from __future__ import annotations
 
 import logging
 import uuid
+import asyncio 
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -35,13 +18,37 @@ from backend.config import (
     TENANTS,
     validate_runtime_config,
 )
-from backend.cost_tracker import CostTracker
+from backend.cost_tracker import get_cost_tracker
 from backend.exceptions import ConfigValidationError, OutboundError, TenantNotFoundError
 from backend.voice.outbound_caller import OutboundCaller
 from backend.voice.session_manager import get_session_manager
 from backend.voice.websocket_handler import WebSocketVoiceHandler
+from backend.observability import (
+    flush_langfuse, init_langfuse, get_langfuse_client, is_langfuse_available
+)
+from backend.observability.prometheus_metrics import PrometheusMiddleware
+from prometheus_client import make_asgi_app, REGISTRY
+import backend.groq_patch
 
 logger = logging.getLogger(__name__)
+
+_cost_sync_task: Optional[asyncio.Task] = None
+
+async def _cost_gauge_sync_loop() -> None:
+    """Background task: sync Redis cost totals to Prometheus Gauges every 30s.
+
+    Runs indefinitely until the FastAPI process shuts down. Non-fatal errors
+    are logged at DEBUG level and retried on the next interval.
+
+    Design note: 30s lag is acceptable for cost dashboards. Real-time cost
+    is available via /api/costs/{tenant_id} which reads Redis directly.
+    """
+    while True:
+        await asyncio.sleep(30)
+        try:
+            _cost_tracker.sync_gauges(TENANTS)
+        except Exception as exc:
+            logger.debug("Cost gauge sync error (non-fatal): %s", exc)
 
 # ── Request / Response models 
 
@@ -89,7 +96,7 @@ class OutboundCampaignRequest(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str
-    version: str = "3.1.0"
+    version: str = "4.0.0"
     services: dict[str, str]
 
 
@@ -98,7 +105,9 @@ class HealthResponse(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application startup and shutdown lifecycle."""
-    logger.info("KoyalAI Phase 3 (v1.1) starting up...")
+    global _cost_sync_task
+
+    logger.info("KoyalAI Starting up...")
 
     # 1. Runtime config validation 
     try:
@@ -108,7 +117,15 @@ async def lifespan(app: FastAPI):
         logger.error("STARTUP FAILURE — config invalid: %s", exc)
         raise
 
-    # 2. Redis connectivity check
+    # 2. Langfuse v4 client initialisation
+    try:
+        lf = init_langfuse()
+        status = "enabled" if is_langfuse_available() else "disabled (no API keys)"
+        logger.info("Langfuse: %s", status)
+    except Exception as exc:
+        logger.warning("Langfuse init warning (non-fatal): %s", exc)
+
+    # 3. Redis connectivity check
     try:
         r = aioredis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
         await r.ping()
@@ -121,17 +138,33 @@ async def lifespan(app: FastAPI):
         )
 
     logger.info("Configured tenants: %s", TENANTS)
-    logger.info("Startup complete.")
+
+    # 4. Start cost gauge sync background task
+    _cost_sync_task = asyncio.create_task(_cost_gauge_sync_loop())
+    logger.info("Cost gauge sync task started (interval=30s)")
+
+    logger.info("Startup complete — KoyalAI ready.")
 
     yield
 
-    # Shutdown: close shared cost tracker connections
+    # ── Shutdown
     logger.info("KoyalAI shutting down...")
+    if _cost_sync_task and not _cost_sync_task.done():
+        _cost_sync_task.cancel()
+        try:
+            await _cost_sync_task
+        except asyncio.CancelledError:
+            pass
     try:
-        tracker = CostTracker()
-        await tracker.close()
+        await flush_langfuse()
+    except Exception as exc:
+        logger.warning("Langfuse flush failed: %s", exc)
+
+    try:
+        await get_cost_tracker().close()
     except Exception:
         pass
+
     logger.info("Shutdown complete.")
 
 
@@ -140,19 +173,27 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="KoyalAI Voice API",
     description="Multilingual AI voice agent — Hindi · English · Hinglish · 9 Indian languages",
-    version="3.1.0",
+    version="4.0.0",
     lifespan=lifespan,
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],    
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:3002",
+        "http://localhost:8000",
+    ],    
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-_cost_tracker = CostTracker()   # Module-level shared connection pool
+_cost_tracker = get_cost_tracker() 
 
+app.add_middleware(PrometheusMiddleware)
+
+metrics_app = make_asgi_app(registry=REGISTRY)
+app.mount("/metrics/", metrics_app)
 
 # ── WebSocket endpoint 
 
@@ -241,22 +282,27 @@ async def health_check() -> HealthResponse:
     except Exception as exc:
         services["redis"] = f"error: {exc}"
 
+    lf = get_langfuse_client()
+    services["langfuse"] = "enabled" if is_langfuse_available() else "disabled"
+
     sm = get_session_manager()
     active = sm.list_active_sessions()
     services["active_sessions"] = str(len(active))
+
     overall = "ok" if services.get("redis") == "ok" else "degraded"
     return HealthResponse(status=overall, services=services)
 
 
-@app.get("/metrics")
-async def metrics_stub() -> dict:
-    """Phase 3 stub. Phase 4 replaces this with prometheus_client.make_asgi_app()."""
-    sm = get_session_manager()
+@app.post("/api/admin/populate-metrics")
+async def populate_metrics():
+    """Populate observability metrics for Grafana testing."""
+    from scripts.populate_observability import main
+    result = await main()
     return {
-        "koyalai_active_sessions": len(sm.list_active_sessions()),
-        "note": "Full Prometheus metrics in Phase 4 — /metrics returns text/plain.",
+        "status": "ok",
+        "populated": result,
+        "note": "Metrics now visible at /metrics/ and in Grafana",
     }
-
 
 if __name__ == "__main__":
     import uvicorn

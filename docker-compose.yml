@@ -1,22 +1,63 @@
+x-langfuse-common-env: &langfuse-common-env
+  DATABASE_URL: postgresql://langfuse:langfuse@postgres-langfuse:5432/langfuse
+  NEXTAUTH_URL: http://localhost:3001
+  NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-YpNqDPpjUi9Eryf30JLTh5ikrUqX1lNm9WuWB8osKOc=}
+  SALT: ${LANGFUSE_SALT:-WfCCs3BqJK+IladDkC+J8kwX5jWw9jp0kEsMdNh3ZBA=}
+  # ENCRYPTION_KEY: REQUIRED for v3. 64-char hex. Generate: openssl rand -hex 32
+  ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-65b9e3d4276058732695e1b14c0a46e7147bc23a3af84901435d39d9393fc052}
+  # ClickHouse — OLAP analytics store for traces
+  CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+  CLICKHOUSE_URL: http://clickhouse:8123
+  CLICKHOUSE_USER: clickhouse
+  CLICKHOUSE_PASSWORD: clickhouse
+  CLICKHOUSE_CLUSTER_ENABLED: "false"
+  # Redis — async worker queue (shared with cost tracker)
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  REDIS_AUTH: ""
+  # MinIO — S3-compatible event/media storage
+  LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_EVENT_UPLOAD_REGION: us-east-1
+  LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minio}
+  LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-miniosecret}
+  LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+  LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+  TELEMETRY_ENABLED: "false"
+  LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "false"
+  # Auto-provision org/project/keys on first boot (no manual UI setup)
+  LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID:-koyalai-org}
+  LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME:-KoyalAI}
+  LANGFUSE_INIT_PROJECT_ID: ${LANGFUSE_INIT_PROJECT_ID:-koyalai-project}
+  LANGFUSE_INIT_PROJECT_NAME: ${LANGFUSE_INIT_PROJECT_NAME:-KoyalAI Production}
+  LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-pk-lf-koyalai-local}
+  LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-sk-lf-koyalai-local}
+  LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-admin@koyalai.io}
+  LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME:-Admin}
+  LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-koyalai2026admin}
+
 services:
+
+  # ── Vector Store 
   qdrant:
     image: qdrant/qdrant:v1.18.0
     container_name: koyalai_qdrant
     ports:
       - "6333:6333"
-      - "6334:6334"       # gRPC port — available for future async client / health probes
+      - "6334:6334"
     volumes:
       - koyalai_qdrant_storage:/qdrant/storage
     environment:
       QDRANT__SERVICE__GRPC_PORT: 6334
       QDRANT__LOG_LEVEL: INFO
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      test: ["CMD", "wget", "-qO-", "http://localhost:6333/healthz"]
       interval: 10s
       timeout: 5s
       retries: 5
     restart: unless-stopped
 
+  # ── Redis 
   redis:
     image: redis:7-alpine
     container_name: koyalai_redis
@@ -32,31 +73,233 @@ services:
       retries: 5
     restart: unless-stopped
 
-
-  backend:
-    build:
-      context: .
-      dockerfile: Dockerfile.backend
-    container_name: koyal_backend
+  # ── Redis Exporter 
+  redis_exporter:
+    image: oliver006/redis_exporter:v1.67.0
+    container_name: koyal_redis_exporter
     ports:
-      - "8000:8000"
-    env_file: .env
+      - "9121:9121"
     environment:
-      QDRANT_HOST: qdrant
-      QDRANT_PORT: 6333
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
+      REDIS_ADDR: "redis://redis:6379"
     depends_on:
-      qdrant:
-        condition: service_healthy
       redis:
         condition: service_healthy
     restart: unless-stopped
+
+  # ── Langfuse Postgres 
+  postgres-langfuse:
+    image: postgres:15-alpine
+    container_name: koyal_langfuse_postgres
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: langfuse
+      POSTGRES_DB: langfuse
     volumes:
-      - ./data:/app/data:ro
+      - postgres_langfuse_data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5433:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse -d langfuse"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ── ClickHouse 
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    container_name: koyal_clickhouse
+    environment:
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    ports:
+      - "127.0.0.1:8123:8123"
+      - "127.0.0.1:9001:9000"
+    restart: unless-stopped
+    healthcheck:
+      # Use wget with proper flags for Alpine
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 60s
+
+  # ── MinIO 
+  minio:
+    image: minio/minio:RELEASE.2025-01-20T14-49-07Z
+    container_name: koyal_minio
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-miniosecret}
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    ports:
+      - "127.0.0.1:9010:9000"
+      - "127.0.0.1:9011:9001"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ── MinIO Init 
+  minio-init:
+    image: minio/mc:latest
+    container_name: koyal_minio_init
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-miniosecret}
+    entrypoint: >
+      /bin/sh -c "
+        mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD &&
+        mc mb --ignore-existing local/langfuse &&
+        echo 'MinIO: langfuse bucket ready'
+      "
+    restart: "no"
+
+  # ── Langfuse Web 
+  langfuse-web:
+    image: langfuse/langfuse:3
+    container_name: koyal_langfuse_web
+    ports:
+      - "3001:3000"
+    environment:
+      <<: *langfuse-common-env
+      NODE_OPTIONS: "--max-old-space-size=2048"
+    depends_on:
+      postgres-langfuse:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "-q", "http://localhost:3000/api/public/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 180s
+
+  # ── Langfuse Worker 
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3
+    container_name: koyal_langfuse_worker
+    environment:
+      <<: *langfuse-common-env
+      NODE_OPTIONS: "--max-old-space-size=1024"
+    depends_on:
+      postgres-langfuse:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # ── Prometheus 
+  prometheus:
+    image: prom/prometheus:v3.4.0
+    container_name: koyal_prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=30d"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+      - "--web.enable-admin-api"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ── Grafana 
+  grafana:
+    image: grafana/grafana:11.6.0
+    container_name: koyal_grafana
+    ports:
+      - "3002:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: koyal2026
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: "/etc/grafana/provisioning/dashboards/koyal_dashboard.json"
+      GF_SECURITY_ALLOW_EMBEDDING: "true"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ── Backend 
+  # backend:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile.backend
+  #   container_name: koyal_backend
+  #   ports:
+  #     - "8000:8000"
+  #   env_file: .env
+  #   environment:
+  #     QDRANT_HOST: qdrant
+  #     QDRANT_PORT: "6333"
+  #     REDIS_HOST: redis
+  #     REDIS_PORT: "6379"
+  #     LANGFUSE_BASE_URL: "http://langfuse-web:3000"
+  #     LANGFUSE_HOST: "http://langfuse-web:3000"
+  #     LANGFUSE_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-pk-lf-koyalai-local}
+  #     LANGFUSE_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-sk-lf-koyalai-local}
+  #   depends_on:
+  #     qdrant:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #     langfuse-web:
+  #       condition: service_healthy
+  #   restart: unless-stopped
+  #   volumes:
+  #     - ./data:/app/data:ro
 
 volumes:
   koyalai_qdrant_storage:
     driver: local
   koyalai_redis_data:
+    driver: local
+  postgres_langfuse_data:
+    driver: local
+  clickhouse_data:
+    driver: local
+  minio_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
     driver: local

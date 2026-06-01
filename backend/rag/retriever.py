@@ -1,24 +1,28 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, List
 
+import httpx
 from qdrant_client import QdrantClient
+from qdrant_client.http.exceptions import ResponseHandlingException
 from sentence_transformers import CrossEncoder
 
 from backend.config import (
     QDRANT_HOST,
     QDRANT_PORT,
+    QDRANT_QUERY_BACKOFF_SECONDS,
+    QDRANT_QUERY_MAX_RETRIES,
     RERANK_TOP_K,
     SCORE_THRESHOLD,
     TOP_K_RETRIEVAL,
+    QDRANT_TIMEOUT,
+    RERANKER_MODEL,
 )
 from backend.rag.embedder import MultilingualEmbedder
 
 logger = logging.getLogger(__name__)
-
-# Multilingual cross-encoder — trained on mMARCO (MS-MARCO translated to 26 langs)
-_RERANKER_MODEL: str = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
 
 
 class MultilingualRetriever:
@@ -33,11 +37,11 @@ class MultilingualRetriever:
         self._client = QdrantClient(
             host=QDRANT_HOST,
             port=QDRANT_PORT,
-            timeout=10,
+            timeout=QDRANT_TIMEOUT,
         )
         self._embedder = MultilingualEmbedder()
-        logger.info("Loading multilingual cross-encoder: %s", _RERANKER_MODEL)
-        self._reranker = CrossEncoder(_RERANKER_MODEL, device="cpu")
+        logger.info("Loading multilingual cross-encoder: %s", RERANKER_MODEL)
+        self._reranker = CrossEncoder(RERANKER_MODEL, device="cpu")
         logger.info("Cross-encoder loaded.")
 
     def retrieve(
@@ -87,15 +91,37 @@ class MultilingualRetriever:
         collection = f"koyalai_{tenant_id}"
         query_vector = self._embedder.embed_single(query)
 
-        # ── Stage 1: ANN search via query_points (Qdrant 1.18.0+) ──
-        response = self._client.query_points(
-            collection_name=collection,
-            query=query_vector,
-            limit=TOP_K_RETRIEVAL,
-            score_threshold=SCORE_THRESHOLD,
-            with_payload=True,
-        )
-
+        # ── Stage 1: ANN search via query_points ──
+        last_exc: Exception | None = None
+        for attempt in range(QDRANT_QUERY_MAX_RETRIES):
+            try:
+                response = self._client.query_points(
+                    collection_name=collection,
+                    query=query_vector,
+                    limit=TOP_K_RETRIEVAL,
+                    score_threshold=SCORE_THRESHOLD,
+                    with_payload=True,
+                )
+                break
+            except (ResponseHandlingException, httpx.ReadTimeout, httpx.ConnectError, TimeoutError) as exc:
+                last_exc = exc
+                logger.warning(
+                    "Qdrant query failed | tenant=%s | attempt=%d/%d | error=%s",
+                    tenant_id,
+                    attempt + 1,
+                    QDRANT_QUERY_MAX_RETRIES,
+                    exc,
+                )
+                if attempt == QDRANT_QUERY_MAX_RETRIES - 1:
+                    raise RuntimeError(
+                        f"Qdrant retrieval failed for tenant '{tenant_id}': {exc}"
+                    ) from exc
+                time.sleep(QDRANT_QUERY_BACKOFF_SECONDS * (2**attempt))
+        else:
+            raise RuntimeError(
+                f"Qdrant retrieval failed for tenant '{tenant_id}': {last_exc}"
+            )
+        
         scored_points = response.points
         if not scored_points:
             logger.info(
