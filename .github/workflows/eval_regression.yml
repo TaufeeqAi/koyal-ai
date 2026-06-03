@@ -1,10 +1,11 @@
+# .github/workflows/eval_regression.yml
 # KoyalAI — Evaluation Regression Gate
 #
 # Runs on:
-#   - Push to main (full eval — RAGAS + Safety)
+#   - Push to main (safety-only — fast, no API key cost)
 #   - Pull requests (safety-only — fast, no API key cost)
-#   - Nightly at 2:00 AM IST (full eval to track drift)
-#   - Manual workflow dispatch
+#   - Nightly at 2:00 AM IST (full eval to track drift, if GROQ_API_KEY is set)
+#   - Manual workflow dispatch (if GROQ_API_KEY is set)
 #
 # Failure policy:
 #   - Safety gate failure → BLOCKS merge (required check)
@@ -40,7 +41,7 @@ env:
   PYTHON_VERSION: "3.11"
 
 jobs:
-  # ── Job 1: Check secrets availability
+  # ── Job 0: Check secrets availability
   check-secrets:
     name: Check Secrets
     runs-on: ubuntu-latest
@@ -58,33 +59,41 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
-  # ── Job 2: Safety Gate (always runs, fast, no API keys) 
+  # ── Job 1: Safety Gate (always runs, fast, no API keys)
   safety-gate:
     name: Safety Gate Regression
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
-    services:
-      qdrant:
-        image: qdrant/qdrant:v1.18.0
-        ports:
-          - 6333:6333
-        options: >-
-          --health-cmd "curl -f http://localhost:6333/readyz"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 10
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-retries 5
-
     steps:
       - uses: actions/checkout@v4
+
+      - name: Start infrastructure
+        run: |
+          docker run -d --name qdrant -p 6333:6333 qdrant/qdrant:v1.18.0
+          docker run -d --name redis -p 6379:6379 redis:7-alpine
+
+          # Wait for Qdrant (poll from the Ubuntu host)
+          echo "Waiting for Qdrant..."
+          for i in {1..30}; do
+            if curl -sf http://localhost:6333/readyz > /dev/null; then
+              echo "✅ Qdrant ready"
+              break
+            fi
+            echo "  Attempt $i/30 — Qdrant not ready yet, retrying in 2s..."
+            sleep 2
+          done
+
+          # Wait for Redis
+          echo "Waiting for Redis..."
+          for i in {1..30}; do
+            if redis-cli -h localhost -p 6379 ping | grep -q PONG; then
+              echo "✅ Redis ready"
+              break
+            fi
+            echo "  Attempt $i/30 — Redis not ready yet, retrying in 2s..."
+            sleep 2
+          done
 
       - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
@@ -93,7 +102,7 @@ jobs:
           cache: pip
 
       - name: Install system dependencies
-        run: sudo apt-get install -y libsndfile1 libgomp1
+        run: sudo apt-get install -y libsndfile1 libgomp1 curl redis-tools
 
       - name: Install Python dependencies
         run: |
@@ -129,7 +138,7 @@ jobs:
           path: eval_results/safety_eval_*.json
           retention-days: 30
 
-  # ── Job 3: RAGAS Evaluation (requires GROQ_API_KEY) 
+  # ── Job 2: RAGAS Evaluation (requires GROQ_API_KEY)
   ragas-evaluation:
     name: RAGAS Multilingual Evaluation
     runs-on: ubuntu-latest
@@ -143,26 +152,35 @@ jobs:
         (github.event_name == 'workflow_dispatch' && github.event.inputs.run_ragas == 'true')
       )
 
-    services:
-      qdrant:
-        image: qdrant/qdrant:v1.14.0
-        ports:
-          - 6333:6333
-        options: >-
-          --health-cmd "curl -f http://localhost:6333/readyz"
-          --health-interval 10s
-          --health-retries 10
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-retries 5
-
     steps:
       - uses: actions/checkout@v4
+
+      - name: Start infrastructure
+        run: |
+          docker run -d --name qdrant -p 6333:6333 qdrant/qdrant:v1.18.0
+          docker run -d --name redis -p 6379:6379 redis:7-alpine
+
+          # Wait for Qdrant (poll from the Ubuntu host)
+          echo "Waiting for Qdrant..."
+          for i in {1..30}; do
+            if curl -sf http://localhost:6333/readyz > /dev/null; then
+              echo "✅ Qdrant ready"
+              break
+            fi
+            echo "  Attempt $i/30 — Qdrant not ready yet, retrying in 2s..."
+            sleep 2
+          done
+
+          # Wait for Redis
+          echo "Waiting for Redis..."
+          for i in {1..30}; do
+            if redis-cli -h localhost -p 6379 ping | grep -q PONG; then
+              echo "✅ Redis ready"
+              break
+            fi
+            echo "  Attempt $i/30 — Redis not ready yet, retrying in 2s..."
+            sleep 2
+          done
 
       - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
@@ -171,7 +189,7 @@ jobs:
           cache: pip
 
       - name: Install system dependencies
-        run: sudo apt-get install -y libsndfile1 libgomp1
+        run: sudo apt-get install -y libsndfile1 libgomp1 curl redis-tools
 
       - name: Install Python dependencies
         run: |
