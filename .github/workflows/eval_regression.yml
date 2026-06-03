@@ -1,0 +1,253 @@
+# KoyalAI — Evaluation Regression Gate
+#
+# Runs on:
+#   - Push to main (full eval — RAGAS + Safety)
+#   - Pull requests (safety-only — fast, no API key cost)
+#   - Nightly at 2:00 AM IST (full eval to track drift)
+#   - Manual workflow dispatch
+#
+# Failure policy:
+#   - Safety gate failure → BLOCKS merge (required check)
+#   - RAGAS threshold failure → WARNING comment (non-blocking in PRs)
+
+name: Multilingual Evaluation Regression Gate
+
+on:
+  push:
+    branches: [main, release/*]
+    paths:
+      - "backend/**"
+      - "data/**"
+      - "tests/eval_multilingual.py"
+  pull_request:
+    branches: [main]
+  schedule:
+    # 2:00 AM IST = 20:30 UTC
+    - cron: "30 20 * * *"
+  workflow_dispatch:
+    inputs:
+      run_ragas:
+        description: "Run RAGAS evaluation (requires GROQ_API_KEY)"
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: eval-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  # ── Job 1: Check secrets availability
+  check-secrets:
+    name: Check Secrets
+    runs-on: ubuntu-latest
+    outputs:
+      groq-key-exists: ${{ steps.check.outputs.exists }}
+    steps:
+      - name: Check GROQ_API_KEY
+        id: check
+        env:
+          GROQ_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          if [ -n "$GROQ_KEY" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── Job 2: Safety Gate (always runs, fast, no API keys) 
+  safety-gate:
+    name: Safety Gate Regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    services:
+      qdrant:
+        image: qdrant/qdrant:v1.18.0
+        ports:
+          - 6333:6333
+        options: >-
+          --health-cmd "curl -f http://localhost:6333/readyz"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install system dependencies
+        run: sudo apt-get install -y libsndfile1 libgomp1
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install webrtcvad-wheels==2.0.14
+          pip install -r requirements.txt
+
+      - name: Ingest documents
+        run: python scripts/ingest_all.py
+        env:
+          QDRANT_HOST: localhost
+          QDRANT_PORT: "6333"
+          REDIS_HOST: localhost
+          REDIS_PORT: "6379"
+
+      - name: Run deterministic safety gate tests
+        run: pytest tests/eval_multilingual.py -v -k "TestSafetyGateRegression" --tb=short
+        env:
+          QDRANT_HOST: localhost
+          REDIS_HOST: localhost
+
+      - name: Run safety evaluation script
+        run: python scripts/run_evals.py --safety-only
+        env:
+          QDRANT_HOST: localhost
+          REDIS_HOST: localhost
+
+      - name: Upload safety report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: safety-eval-report
+          path: eval_results/safety_eval_*.json
+          retention-days: 30
+
+  # ── Job 3: RAGAS Evaluation (requires GROQ_API_KEY) 
+  ragas-evaluation:
+    name: RAGAS Multilingual Evaluation
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: check-secrets
+
+    # Skip if no Groq key. Only run on nightly schedule or manual dispatch.
+    if: |
+      needs.check-secrets.outputs.groq-key-exists == 'true' && (
+        github.event_name == 'schedule' ||
+        (github.event_name == 'workflow_dispatch' && github.event.inputs.run_ragas == 'true')
+      )
+
+    services:
+      qdrant:
+        image: qdrant/qdrant:v1.14.0
+        ports:
+          - 6333:6333
+        options: >-
+          --health-cmd "curl -f http://localhost:6333/readyz"
+          --health-interval 10s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install system dependencies
+        run: sudo apt-get install -y libsndfile1 libgomp1
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install webrtcvad-wheels==2.0.14
+          pip install -r requirements.txt
+
+      - name: Ingest documents
+        run: python scripts/ingest_all.py
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          QDRANT_HOST: localhost
+          REDIS_HOST: localhost
+
+      - name: Run RAGAS multilingual evaluation
+        run: python scripts/run_evals.py --ragas-only --html-report
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          QDRANT_HOST: localhost
+          REDIS_HOST: localhost
+
+      - name: Run pytest RAGAS threshold tests
+        run: pytest tests/eval_multilingual.py -v -k "TestRagasThresholds" --tb=short
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          QDRANT_HOST: localhost
+          REDIS_HOST: localhost
+
+      - name: Upload RAGAS report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ragas-eval-report
+          path: eval_results/ragas_eval_*.json
+          retention-days: 30
+
+      - name: Upload HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ragas-html-report
+          path: eval_results/report.html
+          retention-days: 30
+
+      - name: Parse and comment RAGAS scores (PR only)
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const reports = fs.readdirSync('eval_results')
+              .filter(f => f.startsWith('ragas_eval_'));
+            if (!reports.length) return;
+            const report = JSON.parse(
+              fs.readFileSync(`eval_results/${reports[reports.length - 1]}`)
+            );
+            const passed = report.all_thresholds_passed ? '✓' : '✗';
+            let body = `### ${passed} RAGAS Evaluation Results\n\n`;
+            body += `| Language | Faithfulness | Relevancy | Precision | Recall | Status |\n`;
+            body += `|---|---|---|---|---|---|\n`;
+            
+            const faithByLang = report.thresholds?.faithfulness_by_language || {};
+            
+            for (const [lang, r] of Object.entries(report.results_by_language)) {
+              const status = r.passed_faithfulness ? '✅ PASS' : '❌ FAIL';
+              const thr = faithByLang[lang] || 0.82;
+              body += `| ${lang} | ${r.faithfulness.toFixed(3)} (≥${thr.toFixed(2)}) | `;
+              body += `${r.response_relevancy.toFixed(3)} | `;
+              body += `${r.llm_context_precision.toFixed(3)} | `;
+              body += `${r.context_recall.toFixed(3)} | ${status} |\n`;
+            }
+            
+            body += `\n*Thresholds: hi-IN ≥ 0.80 · en-IN ≥ 0.82 · hi-IN+en-IN ≥ 0.75*\n`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body
+            });

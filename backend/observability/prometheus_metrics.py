@@ -49,7 +49,7 @@ def _histogram(name: str, doc: str, labels: list[str], buckets: list) -> Histogr
         return REGISTRY._names_to_collectors.get(name) or Histogram(name, doc, labels, buckets=buckets)
 
 
-# ── Label normalisation (A) ──────────────────────────────────────────────────
+# ── Label normalisation 
 
 def _norm(label: str | None) -> str:
     """Normalise label value: lowercase, strip whitespace, default 'unknown'.
@@ -188,7 +188,7 @@ _COST_INR_TOTAL: Counter = _counter(
 
 _RAGAS_FAITHFULNESS: Gauge = _gauge(
     "koyal_ragas_faithfulness",
-    "Latest RAGAS faithfulness score (0.0–1.0). Written by Phase 5 evaluation runs.",
+    "Latest RAGAS faithfulness score (0.0-1.0). Written by Phase 5 evaluation runs.",
     ["tenant_id", "language"],
 )
 

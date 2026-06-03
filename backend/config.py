@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 # ── API Keys 
 SARVAM_API_KEY: str = os.getenv("SARVAM_API_KEY", "")
 GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
+GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
+GROQ_EVAL_API_KEY = os.getenv("GROQ_EVAL_API_KEY")
 LANGFUSE_PUBLIC_KEY: str = os.getenv("LANGFUSE_PUBLIC_KEY", "")
 LANGFUSE_SECRET_KEY: str = os.getenv("LANGFUSE_SECRET_KEY", "")
 LANGFUSE_HOST: str = os.getenv("LANGFUSE_HOST", "http://localhost:3001")
@@ -84,6 +86,12 @@ GROQ_TEMPERATURE: float = float(os.getenv("GROQ_TEMPERATURE", "0"))
 GROQ_MAX_TOKENS: int = int(os.getenv("GROQ_MAX_TOKENS", "1024"))
 GROQ_TIMEOUT: int = int(os.getenv("GROQ_TIMEOUT", "30"))
 
+# ── LLM Config (Gemini) 
+
+GEMINI_MODEL_NAME: str = os.getenv("GEMINI_MODEL_NAME", "gemini-2.0-flash")
+GEMINI_TEMPERATURE: float = float(os.getenv("GEMINI_TEMPERATURE", "0"))
+GEMINI_MAX_TOKENS: int = int(os.getenv("GEMINI_MAX_TOKENS", "512"))
+GEMINI_TIMEOUT: int = int(os.getenv("GEMINI_TIMEOUT", "30"))
 
 # ── Sarvam API Endpoints + Timeouts
 SARVAM_STT_URL: str = "https://api.sarvam.ai/speech-to-text"

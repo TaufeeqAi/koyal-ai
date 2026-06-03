@@ -91,7 +91,7 @@ class _NoOpLangfuseClient:
 # ── Smart span filter 
 
 def _should_export_span(span: Any) -> bool:
-    """v4 OTel span filter. Controls which spans reach Langfuse server.
+    """OTel span filter. Controls which spans reach Langfuse server.
 
     Strategy: export LLM/AI spans and KoyalAI custom spans. Block infrastructure
     noise (httpx, redis, asyncio, starlette internals) that would flood Langfuse
@@ -123,7 +123,7 @@ def _should_export_span(span: Any) -> bool:
 # ── Client initialisation 
 
 def init_langfuse() -> Any:
-    """Initialise and return the process-level Langfuse v4 singleton.
+    """Initialise and return the process-level Langfuse singleton.
 
     Gracefully degrades to _NoOpLangfuseClient when:
         - LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY are not set
@@ -166,7 +166,7 @@ def init_langfuse() -> Any:
         )
         _langfuse_available = True
         logger.info(
-            "Langfuse v4 client initialised (host=%s, key=%s...)",
+            "Langfuse client initialised (host=%s, key=%s...)",
             _LANGFUSE_BASE_URL,
             _LANGFUSE_PUBLIC_KEY[:12],
         )
@@ -206,7 +206,7 @@ def make_callback_handler(
     call_type: str = "inbound",
     language: str | None = None,
 ) -> Any:
-    """Create a Langfuse v4 LangChain/LangGraph CallbackHandler for one pipeline turn.
+    """Create a Langfuse LangChain/LangGraph CallbackHandler for one pipeline turn.
 
      The CallbackHandler constructor ONLY accepts
     `public_key` and `update_trace` as direct kwargs. All other attributes (session_id,
@@ -269,3 +269,22 @@ async def flush() -> None:
             logger.info("Langfuse: flushed pending spans on shutdown.")
     except Exception as exc:
         logger.warning("Langfuse flush error (non-fatal): %s", exc)
+
+
+def score_turn(tenant_id: str, language: str, score: float) -> None:
+    """Record a RAGAS score on the current Langfuse trace as a span score.
+
+    No-op if Langfuse is not available. Non-fatal on all errors.
+    """
+    if not _langfuse_available:
+        return
+    try:
+        client = get_langfuse_client()
+        if hasattr(client, "score"):
+            client.score(
+                name="ragas_faithfulness",
+                value=score,
+                comment=f"language={language}, tenant={tenant_id}",
+            )
+    except Exception as exc:
+        logger.debug("Langfuse score_turn error (non-fatal): %s", exc)

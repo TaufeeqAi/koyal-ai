@@ -56,7 +56,9 @@ EMERGENCY_KEYWORDS_ENGLISH: list[str] = [
     "chest pain", "heart attack", "can't breathe", "cannot breathe",
     "unconscious", "stroke", "severe bleeding", "suicidal",
     "want to die", "overdose", "not breathing", "collapsed",
-    "call ambulance", "emergency", "dying",
+    "call ambulance", "emergency", "dying","kill myself",
+    "kill", "end my life", "want to die", "hacked", "account hacked",
+    "money stolen", "fraud", "unauthorized transaction",
 ]
 
 EMERGENCY_KEYWORDS_HINGLISH: list[str] = [

@@ -1,0 +1,9 @@
+{
+  "total": 17,
+  "passed": 17,
+  "failed": 0,
+  "pass_rate": 1.0,
+  "escalation_accuracy": 1.0,
+  "non_escalation_accuracy": 1.0,
+  "failed_cases": []
+}

@@ -5,6 +5,7 @@ temp.py
 checkpoints.py
 backend/metrics.py
 commitmsg.txt
+.deepeval/
 
 backend/__pycache__/
 backend/rag/__pycache__/
@@ -12,4 +13,5 @@ backend/agents/__pycache__/
 tests/__pycache__/
 backend/safety/__pycache__/
 backend/voice/__pycache__/
-backend/observability/__pycache__
+backend/observability/__pycache__/
+scripts/__pycache__/

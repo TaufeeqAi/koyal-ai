@@ -4,6 +4,8 @@ langchain-community==0.4.1
 langchain-groq==1.1.2
 langgraph==1.2.0
 groq
+langchain-huggingface==1.2.2
+langchain-google-genai==4.2.4
 
 # Vector Store
 qdrant-client==1.18.0
