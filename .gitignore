@@ -6,6 +6,9 @@ checkpoints.py
 backend/metrics.py
 commitmsg.txt
 .deepeval/
+deepeval
+logs/
+.sip_provision.json
 
 backend/__pycache__/
 backend/rag/__pycache__/
@@ -15,3 +18,4 @@ backend/safety/__pycache__/
 backend/voice/__pycache__/
 backend/observability/__pycache__/
 scripts/__pycache__/
+backend/telephony/__pycache__/

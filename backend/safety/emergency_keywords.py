@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 from typing import Optional
+import threading
 
 import numpy as np
 from sentence_transformers import SentenceTransformer
@@ -42,6 +43,8 @@ from backend.exceptions import EmergencyDetectionError
 
 logger = logging.getLogger(__name__)
 
+_detector_instance: Optional["MultilingualEmergencyDetector"] = None
+_detector_lock = threading.Lock()
 # ── Keyword Lists 
 
 EMERGENCY_KEYWORDS_HINDI: list[str] = [
@@ -230,10 +233,13 @@ def get_default_detector() -> MultilingualEmergencyDetector:
     Returns:
         The shared ``MultilingualEmergencyDetector`` instance.
     """
-    global _default_detector  # noqa: PLW0603
-    if _default_detector is None:
-        _default_detector = MultilingualEmergencyDetector()
-    return _default_detector
+    global _detector_instance  
+    if _detector_instance is not None:
+        return _detector_instance
+    with _detector_lock:
+        if _detector_instance is None:
+            logger.info("First call to get_default_detector — initializing...")
+            _detector_instance = MultilingualEmergencyDetector()
+        return _detector_instance
 
 
-_default_detector: Optional[MultilingualEmergencyDetector] = None

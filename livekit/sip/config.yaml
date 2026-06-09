@@ -1,0 +1,98 @@
+# LiveKit SIP Bridge Configuration — KoyalAI 
+#
+# What this controls:
+#   • PSTN gateway: SIP signaling (UDP/TCP 5060) ↔ LiveKit WebRTC rooms
+#   • RTP media routing: audio stream translation between SIP and WebRTC
+#   • Redis coordination: shared state with livekit-server
+#   • SIP trunk registration: inbound DIDs and outbound caller-ID
+#
+# Container mount:  ./livekit/sip/config.yaml:/etc/livekit/config.yaml:ro
+# Binary:          livekit-sip --config /etc/livekit/config.yaml
+#
+# Architecture:
+#   PSTN caller ──► SIP provider ──► livekit-sip:5060/udp
+#                                        │
+#                                        ▼
+#                                   RTP ↔ WebRTC translation
+#                                        │
+#                                        ▼
+#                                   LiveKit room (created by dispatch rule)
+#                                        │
+#                                        ▼
+#                                   KoyalRoom agent (inbound_handler.py)
+#
+# Dev vs Production:
+#   ┌─────────────────┬──────────────────────┬─────────────────────────────┐
+#   │ Setting         │ Dev (this file)      │ Production                  │
+#   ├─────────────────┼──────────────────────┼─────────────────────────────┤
+#   │ ws_url          │ ws://livekit-server  │ wss://livekit.yourdomain.io │
+#   │ allowed_addrs   │ 0.0.0.0/0            │ Provider CIDR ranges only   │
+#   │ numbers         │ +911234567890        │ Real DIDs from provider     │
+#   │ use_external_ip │ false                │ true (public IP required)   │
+#   │ redis           │ redis:6379           │ Redis Cluster / ElastiCache │
+#   │ tls             │ disabled             │ Required for SRTP           │
+#   └─────────────────┴──────────────────────┴─────────────────────────────┘
+#
+# The livekit-sip container also accepts env vars that OVERRIDE this config:
+#   LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET, REDIS_HOST, etc.
+# We set both (config file for clarity + env vars as fallback in docker-compose).
+# ───────────────────────────────────────────────────────────────────────────
+
+# Logging
+log_level: info
+
+# LiveKit server connection
+# Must match the keys: in livekit/livekit.yaml
+api_key: devkey
+api_secret: secret
+
+# WebSocket URL of livekit-server container
+# In Docker network: service name resolves to container IP
+ws_url: ws://livekit-server:7880
+
+# Redis — MUST be the same Redis instance that livekit-server uses
+# Used for: distributed room state, SIP session tracking, rate limiting
+redis:
+  address: redis:6379
+  # Production: add password, TLS, or cluster addresses
+
+# SIP signaling port
+# 5060 is the standard SIP port (UDP preferred, TCP fallback)
+sip_port: 5060
+
+# RTP media port range
+# Each concurrent call consumes 2 ports (RTP + RTCP)
+# 10000-10100 = 50 ports = ~25 concurrent calls (dev limit)
+# Production: expand to 10000-20000 (5000 calls) or use ephemeral ports
+rtp_port: 10000-10100
+
+# External IP discovery
+# FALSE in dev: SIP traffic stays within Docker network
+# TRUE in production: SIP provider sends RTP to your public IP
+use_external_ip: false
+
+# Production: explicit public IP (if use_external_ip: true and auto-detect fails)
+# public_ip: "203.0.113.10"
+
+# SIP trunk configuration (inbound)
+# Created dynamically via SIPTrunkManager in scripts/provision_sip.py
+# This section is OPTIONAL — trunks can be provisioned via API instead
+# inbound_trunk:
+#   name: "KoyalAI Production Inbound"
+#   numbers:
+#     - "+911234567890"
+#   allowed_addresses:
+#     - "54.172.60.0/30"   # Twilio SIP CIDR example
+
+# SIP trunk configuration (outbound)
+# Created dynamically via SIPTrunkManager
+# outbound_trunk:
+#   name: "KoyalAI Production Outbound"
+#   address: "sip.twilio.com"
+#   numbers:
+#     - "+911234567891"
+
+# TLS/SRTP (production only)
+# tls:
+#   cert_file: /etc/ssl/certs/livekit-sip.crt
+#   key_file: /etc/ssl/private/livekit-sip.key

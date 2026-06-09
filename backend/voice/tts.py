@@ -34,12 +34,20 @@ import httpx
 from backend.config import (
     SARVAM_API_KEY,
     SARVAM_TTS_URL,
+    SARVAM_VOICE_MAP,
+    DEFAULT_VOICE,
     TTS_BACKOFF_BASE,
     TTS_MAX_CHARS_PER_CHUNK,
     TTS_MAX_RETRIES,
     TTS_MODEL,
     TTS_PACE,
     TTS_SAMPLE_RATE,
+    TTS_TIMEOUT,
+    TTS_PREPROCESSING_ALWAYS_ENABLED,
+    TTS_SUPPORTS_LOUDNESS,
+    TTS_SUPPORTS_PITCH,
+    TTS_SUPPORTS_TEMPERATURE,
+    TTS_TEMPERATURE,
     TTS_TIMEOUT,
 )
 from backend.exceptions import TTSError
@@ -49,27 +57,13 @@ logger = logging.getLogger(__name__)
 _ASYNC_TIMEOUT = httpx.Timeout(timeout=float(TTS_TIMEOUT), connect=5.0)
 _SYNC_TIMEOUT = httpx.Timeout(timeout=float(TTS_TIMEOUT), connect=5.0)
 
-# Full language → Sarvam voice mapping (9 Indian languages)
-LANGUAGE_VOICE_MAP: dict[str, str] = {
-    "hi-IN":       "meera",    # Hindi female — warm, natural
-    "en-IN":       "anushka",  # Indian-accented English
-    "hi-IN+en-IN": "meera",    # Hinglish — Hindi voice handles mixed script best
-    "mr-IN":       "madhura",  # Marathi
-    "ta-IN":       "pavithra", # Tamil
-    "te-IN":       "hema",     # Telugu
-    "kn-IN":       "gagan",    # Kannada
-    "bn-IN":       "bani",     # Bengali
-    "gu-IN":       "diya",     # Gujarati
-    "pa-IN":       "arjun",    # Punjabi
-}
-DEFAULT_VOICE: str = "meera"
 
 _HINDI_SENTENCE_RE = re.compile(r"[।!?.]")
 _ENGLISH_SENTENCE_RE = re.compile(r"[.!?]")
 
 
 def _get_voice(language_code: str) -> str:
-    return LANGUAGE_VOICE_MAP.get(language_code, DEFAULT_VOICE)
+    return SARVAM_VOICE_MAP.get(language_code, DEFAULT_VOICE)
 
 
 def _get_target_lang(language_code: str) -> str:
@@ -337,17 +331,27 @@ class SarvamTTS:
     # ── Private helpers 
 
     def _build_payload(self, text: str, language_code: str, pace: float) -> dict:
-        return {
+        payload: dict = {
             "inputs": [text],
             "target_language_code": _get_target_lang(language_code),
             "speaker": _get_voice(language_code),
-            "pitch": 0,
             "pace": pace,
-            "loudness": 1.5,
             "speech_sample_rate": self._sample_rate,
-            "enable_preprocessing": True,
             "model": TTS_MODEL,
         }
+        
+        if TTS_SUPPORTS_TEMPERATURE:
+            payload["temperature"] = TTS_TEMPERATURE
+        
+        if TTS_SUPPORTS_PITCH:
+            payload["pitch"] = 0
+        if TTS_SUPPORTS_LOUDNESS:
+            payload["loudness"] = 1.5
+        
+        if not TTS_PREPROCESSING_ALWAYS_ENABLED:
+            payload["enable_preprocessing"] = True
+        
+        return payload
 
     @staticmethod
     def _decode_audio(response_json: dict) -> bytes:

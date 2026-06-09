@@ -28,9 +28,10 @@ Usage example:
 """
 
 from __future__ import annotations
+
 import backend.groq_patch
 import logging
-import time
+
 from typing import Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -38,8 +39,6 @@ from langchain_groq import ChatGroq
 
 from backend.agents.state import AgentState
 from backend.config import (
-    AGENT_BACKOFF_BASE,
-    AGENT_MAX_RETRIES,
     GROQ_API_KEY,
     GROQ_MAX_TOKENS,
     GROQ_MODEL_NAME,
@@ -143,50 +142,25 @@ def response_agent(state: AgentState) -> dict:
         trace_id, GROQ_MODEL_NAME, tenant_id, len(context),
     )
 
-    last_error: Optional[Exception] = None
-    for attempt in range(AGENT_MAX_RETRIES):
-        try:
-            llm = _get_llm()
-            response = llm.invoke([
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=user_message),
-            ])
-
-            raw_response: str = response.content.strip()
-            token_usage: int = 0
-            if hasattr(response, "usage_metadata") and response.usage_metadata:
-                token_usage = response.usage_metadata.get("total_tokens", 0)
-
-            logger.info(
-                "[%s] Groq response: %d chars, %d tokens",
-                trace_id, len(raw_response), token_usage,
-            )
-            logger.debug("[%s] Raw LLM output: %r", trace_id, raw_response[:200])
-
-            return {
-                "raw_response": raw_response,
-                "llm_tokens": token_usage,
-            }
-
-        except GroqAPIError:
-            raise  
-
-        except Exception as exc:
-            last_error = exc
-            logger.warning(
-                "[%s] Groq call failed (attempt %d/%d): %s",
-                trace_id, attempt + 1, AGENT_MAX_RETRIES, exc,
-            )
-            if attempt < AGENT_MAX_RETRIES - 1:
-                sleep_for = AGENT_BACKOFF_BASE**attempt
-                logger.debug("[%s] Retrying Groq in %.1fs...", trace_id, sleep_for)
-                time.sleep(sleep_for)
-
-    raise ResponseGenerationError(
-        f"Groq response generation failed after {AGENT_MAX_RETRIES} attempts.",
-        tenant_id=tenant_id,
-        last_error=str(last_error),
-    )
+    try:
+        llm = _get_llm()
+        response = llm.invoke([
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_message),
+        ])
+        
+        raw_response = response.content.strip()
+        token_usage = response.usage_metadata.get("total_tokens", 0) if hasattr(response, "usage_metadata") else 0
+        
+        logger.info("[%s] Groq response: %d chars, %d tokens", trace_id, len(raw_response), token_usage)
+        return {"raw_response": raw_response, "llm_tokens": token_usage}
+        
+    except Exception as exc:
+        logger.error("[%s] Groq call failed: %s", trace_id, exc)
+        return {
+            "raw_response": "I'm sorry, I'm having trouble right now. Please try again.",
+            "llm_tokens": 0,
+        }
 
 
 def _build_system_prompt(tenant_id: str, detected_language: str) -> str:

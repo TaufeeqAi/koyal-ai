@@ -39,31 +39,10 @@ import logging
 
 from backend.agents.state import AgentState
 from backend.exceptions import RetrievalError
-from backend.rag.retriever import MultilingualRetriever
-from backend.safety.guardrails_handler import get_guardrails_handler
+from backend.rag.retriever import get_retriever
+from backend.config import GUARDRAILS_ENABLED 
 
 logger = logging.getLogger(__name__)
-
-# Module-level singletons — shared across all invocations in the same process
-_retriever: MultilingualRetriever | None = None
-_guardrails = None  # Lazy-initialized below
-
-
-def _get_retriever() -> MultilingualRetriever:
-    """Lazily initialise and return the shared retriever singleton."""
-    global _retriever  # noqa: PLW0603
-    if _retriever is None:
-        logger.info("Initialising MultilingualRetriever singleton...")
-        _retriever = MultilingualRetriever()
-    return _retriever
-
-
-def _get_guardrails():
-    """Lazily initialise and return the shared guardrails singleton."""
-    global _guardrails  # noqa: PLW0603
-    if _guardrails is None:
-        _guardrails = get_guardrails_handler()
-    return _guardrails
 
 
 def retrieval_agent(state: AgentState) -> dict:
@@ -123,7 +102,7 @@ def retrieval_agent(state: AgentState) -> dict:
 
     # ── Step 1: Raw retrieval from Qdrant 
     try:
-        retriever = _get_retriever()
+        retriever = get_retriever()
         raw_chunks = retriever.retrieve(
             query=query_english,
             tenant_id=tenant_id,
@@ -147,16 +126,25 @@ def retrieval_agent(state: AgentState) -> dict:
             "guardrail_pii_masked": [],
         }
 
-    # ── Step 2: Guardrails validation on retrieved chunks 
-    guardrails = _get_guardrails()
-    safe_chunks, pii_redacted = guardrails.process_retrieval(
+    # ── Step 2: Guardrails validation on retrieved chunks (SKIP when disabled)
+    if GUARDRAILS_ENABLED:
+        from backend.safety.guardrails_handler import get_guardrails_handler
+        guardrails = get_guardrails_handler()
+        safe_chunks, pii_redacted = guardrails.process_retrieval(
         raw_chunks, tenant_id, trace_id
-    )
+        )
 
-    logger.info(
-        "[%s] Retrieval guardrails: %d raw chunks -> %d safe chunks (%d PII redacted)",
-        trace_id, len(raw_chunks), len(safe_chunks), len(pii_redacted),
-    )
+        logger.info(
+            "[%s] Retrieval guardrails: %d raw chunks -> %d safe chunks (%d PII redacted)",
+            trace_id, len(raw_chunks), len(safe_chunks), len(pii_redacted),
+        )
+    else:
+        safe_chunks = raw_chunks
+        pii_redacted = []
+        logger.info(
+            "[%s] Guardrails disabled — using %d raw chunks directly.",
+            trace_id, len(raw_chunks),
+        )
 
     # ── Step 3: Format context for LLM prompt 
     context = _format_context(safe_chunks)

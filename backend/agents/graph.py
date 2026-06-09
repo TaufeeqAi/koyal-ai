@@ -69,6 +69,7 @@ from typing import Literal
 
 from langgraph.graph import END, START, StateGraph
 
+from backend.config import GUARDRAILS_ENABLED
 from backend.agents.escalation_handler import escalation_handler
 from backend.agents.language_bridge import LanguageBridge
 from backend.agents.language_detector import LanguageDetector
@@ -84,9 +85,6 @@ logger = logging.getLogger(__name__)
 _detector = LanguageDetector()
 _bridge = LanguageBridge()
 
-# Guardrails handler is loaded LAZILY to avoid triggering ONNX model
-# downloads and background threads on every import (e.g. during test
-# collection). It only initialises when a guardrails node actually runs.
 _guardrails = None
 
 
@@ -137,6 +135,9 @@ def input_guardrails_node(state: AgentState) -> dict:
         refusal/termination and ``guardrail_input_blocked=True``. If safe,
         returns (potentially PII-masked) query for safety_gate processing.
     """
+    if not GUARDRAILS_ENABLED:
+        logger.info("[%s] Guardrails disabled, passing through", state.get("trace_id", "?"))
+        return {}
     return _get_guardrails().input_rail_node(state)
 
 
@@ -146,6 +147,10 @@ def output_guardrails_node(state: AgentState) -> dict:
     Returns partial state. If blocked, rewrites ``final_response`` to a
     safe fallback before TTS. Does NOT escalate — only sanitizes output.
     """
+    if not GUARDRAILS_ENABLED:
+        logger.info("[%s] Guardrails disabled, passing through", state.get("trace_id", "?"))
+        return {}
+    
     return _get_guardrails().output_rail_node(state)
 
 
@@ -238,10 +243,8 @@ def build_koyal_graph():
     """Build and compile the KoyalAI LangGraph pipeline."""
     graph = StateGraph(AgentState)
 
-    # Register all nodes
+    # ── Core nodes
     graph.add_node("language_detect", language_detection_node)
-    graph.add_node("input_guardrails", input_guardrails_node)
-    graph.add_node("output_guardrails", output_guardrails_node)
     graph.add_node("safety_gate", safety_gate_agent)
     graph.add_node("language_bridge", language_bridge_node)
     graph.add_node("retrieval", retrieval_agent)
@@ -253,16 +256,24 @@ def build_koyal_graph():
     # Entry point
     graph.add_edge(START, "language_detect")
 
-    # Input guardrails: blocks → END, safe → safety_gate
-    graph.add_edge("language_detect", "input_guardrails")
-    graph.add_conditional_edges(
-        "input_guardrails",
-        _route_after_input_guardrails,
-        {
-            "safety_gate": "safety_gate",
-            "end": END,
-        },
-    )
+    # ── Guardrails path: bypass entirely when disabled
+    if GUARDRAILS_ENABLED:
+        graph.add_node("input_guardrails", input_guardrails_node)
+        graph.add_node("output_guardrails", output_guardrails_node)
+
+        graph.add_edge("language_detect", "input_guardrails")
+        graph.add_conditional_edges(
+            "input_guardrails",
+            _route_after_input_guardrails,
+            {"safety_gate": "safety_gate", "end": END},
+        )
+        graph.add_edge("translate_response", "output_guardrails")
+        graph.add_edge("output_guardrails", END)
+
+    else:
+        graph.add_edge("language_detect", "safety_gate")
+        graph.add_edge("translate_response", END)
+
 
     # Safety gate: SOLE escalation authority
     graph.add_conditional_edges(
@@ -280,15 +291,14 @@ def build_koyal_graph():
     graph.add_edge("response", "verification")
     graph.add_edge("verification", "translate_response")
 
-    # Output guardrails before END
-    graph.add_edge("translate_response", "output_guardrails")
-    graph.add_edge("output_guardrails", END)
-
     # Escalation ends
     graph.add_edge("escalation", END)
 
     compiled = graph.compile()
-    logger.info("KoyalAI LangGraph compiled successfully (single escalation authority).")
+    logger.info(
+        "KoyalAI LangGraph compiled (guardrails=%s).",
+        "enabled" if GUARDRAILS_ENABLED else "DISABLED"
+    )
     return compiled
 
 

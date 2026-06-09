@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 import asyncio 
 from contextlib import asynccontextmanager
 from typing import Optional
 
 import redis.asyncio as aioredis
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 
 from backend.config import (
+    GUARDRAILS_ENABLED,
     REDIS_DB,
     REDIS_HOST,
     REDIS_PORT,
@@ -19,8 +21,10 @@ from backend.config import (
     validate_runtime_config,
 )
 from backend.cost_tracker import get_cost_tracker
-from backend.exceptions import ConfigValidationError, OutboundError, TenantNotFoundError
-from backend.voice.outbound_caller import OutboundCaller
+from backend.exceptions import ConfigValidationError
+from backend.rag.embedder import get_embedder
+from backend.rag.retriever import get_retriever
+from backend.safety.emergency_keywords import get_default_detector
 from backend.voice.session_manager import get_session_manager
 from backend.voice.websocket_handler import WebSocketVoiceHandler
 from backend.observability import (
@@ -28,6 +32,9 @@ from backend.observability import (
 )
 from backend.observability.prometheus_metrics import PrometheusMiddleware
 from prometheus_client import make_asgi_app, REGISTRY
+from backend.telephony.inbound_handler import router as telephony_router
+from backend.telephony.outbound_dialer import router as outbound_router
+from backend.telephony.outbound_dialer import LiveKitSIPOutbound
 import backend.groq_patch
 
 logger = logging.getLogger(__name__)
@@ -107,6 +114,9 @@ async def lifespan(app: FastAPI):
     """Application startup and shutdown lifecycle."""
     global _cost_sync_task
 
+    from backend.logging_config import setup_logging
+    setup_logging()
+    
     logger.info("KoyalAI Starting up...")
 
     # 1. Runtime config validation 
@@ -117,7 +127,7 @@ async def lifespan(app: FastAPI):
         logger.error("STARTUP FAILURE — config invalid: %s", exc)
         raise
 
-    # 2. Langfuse v4 client initialisation
+    # 2. Langfuse client initialisation
     try:
         lf = init_langfuse()
         status = "enabled" if is_langfuse_available() else "disabled (no API keys)"
@@ -143,8 +153,43 @@ async def lifespan(app: FastAPI):
     _cost_sync_task = asyncio.create_task(_cost_gauge_sync_loop())
     logger.info("Cost gauge sync task started (interval=30s)")
 
-    logger.info("Startup complete — KoyalAI ready.")
+    # 5. Pre-load heavy ML models to eliminate cold-start latency
+    logger.info("=" * 60)
+    logger.info("PRE-LOADING ML MODELS (this may take 10-30s)...")
+    logger.info("=" * 60)
 
+    preloads = [
+        ("LaBSE embedder",    lambda: get_embedder()),
+        ("Cross-encoder",     lambda: get_retriever()),
+        ("Emergency detector", lambda: get_default_detector()),
+    ]
+    logger.info("Pre-loading emergency detector...")
+    for name, loader in preloads:
+        start = time.monotonic()
+        try:
+            loader()
+            elapsed = time.monotonic() - start
+            logger.info("✓ %s pre-loaded (%.1fs)", name, elapsed)
+        except Exception as exc:
+            logger.error("✗ %s pre-load failed: %s", name, exc)
+            logger.warning("  First request will pay cold-start penalty")
+
+    logger.info("=" * 60)
+    logger.info("ALL MODELS PRE-LOADED — READY FOR CALLS")
+    logger.info("=" * 60)
+
+    # 6. Pre-load Guardrails to avoid 60s delay on first request
+    if GUARDRAILS_ENABLED:
+        logger.info("Pre-loading NeMo Guardrails...")
+        try:
+            from backend.safety.guardrails_handler import get_guardrails_handler
+            get_guardrails_handler()
+            logger.info("Guardrails pre-loaded.")
+        except Exception as exc:
+            logger.warning("Guardrails pre-load failed: %s", exc)
+    else:
+        logger.info("Guardrails disabled — skipping pre-load.")
+    
     yield
 
     # ── Shutdown
@@ -195,6 +240,9 @@ app.add_middleware(PrometheusMiddleware)
 metrics_app = make_asgi_app(registry=REGISTRY)
 app.mount("/metrics/", metrics_app)
 
+app.include_router(telephony_router)
+app.include_router(outbound_router)
+
 # ── WebSocket endpoint 
 
 @app.websocket("/ws/{tenant_id}/{session_id}")
@@ -222,29 +270,39 @@ async def voice_websocket(websocket: WebSocket, tenant_id: str, session_id: str)
 @app.post("/api/outbound/campaign", status_code=202)
 async def run_outbound_campaign(request: OutboundCampaignRequest) -> dict:
     try:
-        caller = OutboundCaller(request.tenant_id)
-        contact_dicts = [c.model_dump() for c in request.contact_list]
-        results = await caller.run_outbound_campaign(
-            contact_list=contact_dicts,
-            script_template=request.script_template,
-            language=request.language,
-            max_concurrent=request.max_concurrent,
-        )
-        completed = sum(1 for r in results if r.get("status") == "completed")
+        async with LiveKitSIPOutbound() as dialer:
+            contact_dicts = [
+                {**c.model_dump(), "tenant_id": request.tenant_id}
+                for c in request.contact_list
+            ]
+            campaign = await dialer.dial_campaign(
+                contacts=contact_dicts,
+                script_template=request.script_template,
+                language=request.language,
+                max_concurrent=request.max_concurrent,
+            )
+
         return {
             "campaign_id": str(uuid.uuid4()),
             "tenant_id": request.tenant_id,
-            "total": len(results),
-            "completed": completed,
-            "failed": len(results) - completed,
-            "results": results,
+            "total": campaign.total,
+            "dialing": campaign.dialing,
+            "failed": campaign.failed,
+            "skipped": campaign.skipped,
+            "results": [
+                {
+                    "phone": r.phone,
+                    "status": r.status,
+                    "room_name": r.room_name,
+                    "sip_call_id": r.sip_call_id,
+                    "error": r.error,
+                }
+                for r in campaign.results
+            ],
         }
-    except OutboundError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Outbound campaign error: %s", exc)
         raise HTTPException(status_code=500, detail=f"Campaign failed: {exc}") from exc
-
 
 @app.get("/api/costs/{tenant_id}")
 def get_tenant_costs(tenant_id: str) -> dict:

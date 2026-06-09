@@ -1,3 +1,38 @@
+# KoyalAI Full Stack 
+#
+# Services:
+#   qdrant (vector store)
+#   redis (caching, sessions, cost tracker)
+#   langfuse-web, langfuse-worker, postgres-langfuse, clickhouse, minio
+#            prometheus, grafana, redis_exporter
+#   livekit-server, livekit-sip, koyal-worker
+#
+#
+# Startup order:
+#   1. Infrastructure: qdrant, redis, postgres-langfuse, clickhouse, minio
+#   2. Init: minio-init
+#   3. Observability: langfuse-web, langfuse-worker, prometheus, grafana
+#   4. Telephony: livekit-server 
+#   5. Telephony: livekit-sip (depends on livekit-server)
+#   6. Workers: koyal-worker (depends on livekit-server)
+#
+# Port Mapping Summary:
+#   3001  — Langfuse Web UI
+#   3002  — Grafana
+#   6333  — Qdrant REST
+#   6334  — Qdrant gRPC
+#   7880  — LiveKit WebSocket signaling 
+#   7881  — LiveKit TCP RTC fallback
+#   7882  — LiveKit UDP RTC media 
+#   8000  — KoyalAI Backend (FastAPI) 
+#   9010  — MinIO API
+#   9011  — MinIO Console
+#   9090  — Prometheus
+#   9121  — Redis Exporter
+#   5060  — SIP signaling (UDP/TCP) 
+#   10000-10100 — RTP media range
+# ───────────────────────────────────────────────────────────────────────────
+
 x-langfuse-common-env: &langfuse-common-env
   DATABASE_URL: postgresql://langfuse:langfuse@postgres-langfuse:5432/langfuse
   NEXTAUTH_URL: http://localhost:3001
@@ -38,13 +73,17 @@ x-langfuse-common-env: &langfuse-common-env
 
 services:
 
-  # ── Vector Store 
+  # ═══════════════════════════════════════════════════════════════════════
+  # DATA INFRASTRUCTURE
+  # ═══════════════════════════════════════════════════════════════════════
+
+  # ── Vector Store ───────────────────────────────────────────────────────
   qdrant:
     image: qdrant/qdrant:v1.18.0
     container_name: koyalai_qdrant
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      - "6333:6333"   # REST API
+      - "6334:6334"   # gRPC
     volumes:
       - koyalai_qdrant_storage:/qdrant/storage
     environment:
@@ -57,7 +96,7 @@ services:
       retries: 5
     restart: unless-stopped
 
-  # ── Redis 
+  # ── Redis ──────────────────────────────────────────────────────────────
   redis:
     image: redis:7-alpine
     container_name: koyalai_redis
@@ -73,7 +112,7 @@ services:
       retries: 5
     restart: unless-stopped
 
-  # ── Redis Exporter 
+  # ── Redis Exporter ─────────────────────────────────────────────────────
   redis_exporter:
     image: oliver006/redis_exporter:v1.67.0
     container_name: koyal_redis_exporter
@@ -86,7 +125,11 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  # ── Langfuse Postgres 
+  # ═══════════════════════════════════════════════════════════════════════
+  # OBSERVABILITY (Langfuse + Prometheus + Grafana)
+  # ═══════════════════════════════════════════════════════════════════════
+
+  # ── Langfuse Postgres ──────────────────────────────────────────────────
   postgres-langfuse:
     image: postgres:15-alpine
     container_name: koyal_langfuse_postgres
@@ -106,7 +149,7 @@ services:
       retries: 10
       start_period: 30s
 
-  # ── ClickHouse 
+  # ── ClickHouse ─────────────────────────────────────────────────────────
   clickhouse:
     image: clickhouse/clickhouse-server:24.8-alpine
     container_name: koyal_clickhouse
@@ -122,14 +165,13 @@ services:
       - "127.0.0.1:9001:9000"
     restart: unless-stopped
     healthcheck:
-      # Use wget with proper flags for Alpine
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8123/ping"]
       interval: 10s
       timeout: 5s
       retries: 15
       start_period: 60s
 
-  # ── MinIO 
+  # ── MinIO ──────────────────────────────────────────────────────────────
   minio:
     image: minio/minio:RELEASE.2025-01-20T14-49-07Z
     container_name: koyal_minio
@@ -149,7 +191,7 @@ services:
       timeout: 5s
       retries: 5
 
-  # ── MinIO Init 
+  # ── MinIO Init ─────────────────────────────────────────────────────────
   minio-init:
     image: minio/mc:latest
     container_name: koyal_minio_init
@@ -167,7 +209,7 @@ services:
       "
     restart: "no"
 
-  # ── Langfuse Web 
+  # ── Langfuse Web ───────────────────────────────────────────────────────
   langfuse-web:
     image: langfuse/langfuse:3
     container_name: koyal_langfuse_web
@@ -193,7 +235,7 @@ services:
       retries: 10
       start_period: 180s
 
-  # ── Langfuse Worker 
+  # ── Langfuse Worker ────────────────────────────────────────────────────
   langfuse-worker:
     image: langfuse/langfuse-worker:3
     container_name: koyal_langfuse_worker
@@ -211,7 +253,7 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
-  # ── Prometheus 
+  # ── Prometheus ─────────────────────────────────────────────────────────
   prometheus:
     image: prom/prometheus:v3.4.0
     container_name: koyal_prometheus
@@ -233,7 +275,7 @@ services:
       timeout: 5s
       retries: 5
 
-  # ── Grafana 
+  # ── Grafana ────────────────────────────────────────────────────────────
   grafana:
     image: grafana/grafana:11.6.0
     container_name: koyal_grafana
@@ -259,7 +301,121 @@ services:
       timeout: 5s
       retries: 5
 
-  # ── Backend 
+  # ═══════════════════════════════════════════════════════════════════════
+  # LIVEKIT TELEPHONY
+  # ═══════════════════════════════════════════════════════════════════════
+
+  # ── LiveKit Server ─────────────────────────────────────────────────────
+  # WebRTC signaling hub. Manages rooms, participants, tracks, and JWT auth.
+  # Mounts livekit/livekit.yaml for all configuration.
+  #
+  # Healthcheck: HTTP GET / on port 7880
+  # Depends on: redis (for distributed room state)
+  livekit-server:
+    image: livekit/livekit-server:latest
+    container_name: koyal_livekit
+    ports:
+      - "7880:7880"       # WebSocket signaling (ws://localhost:7880)
+      - "7881:7881"       # TCP RTC fallback (corporate firewalls)
+      - "7882:7882/udp"   # UDP RTC primary media path (SRTP/DTLS)
+    volumes:
+      # Mount the livekit/ folder config into container
+      - ./livekit/livekit.yaml:/etc/livekit.yaml:ro
+    command:
+      - "--config"
+      - "/etc/livekit.yaml"
+      - "--dev"
+      - "--node-ip"
+      - "host.docker.internal"
+    depends_on:
+      redis:
+        condition: service_started
+    restart: unless-stopped
+
+  # ── LiveKit SIP Bridge ─────────────────────────────────────────────────
+  # PSTN gateway: translates SIP signaling + RTP media ↔ LiveKit WebRTC.
+  # Uses livekit/sip/config.yaml for SIP-specific settings.
+  # Also accepts env vars as fallback/override.
+  #
+  # Port 5060: SIP signaling (UDP primary, TCP fallback)
+  # Ports 10000-10100: RTP media (2 ports per call = ~25 concurrent dev calls)
+  #
+  # Healthcheck: HTTP GET /healthz on port 8080 (SIP container internal)
+  # Depends on: livekit-server (must be healthy), redis (session state)
+  livekit-sip:
+    image: livekit/sip:latest
+    container_name: koyal_livekit_sip
+    ports:
+      - "5060:5060/udp"                # SIP signaling UDP (primary)
+      - "5060:5060/tcp"                # SIP signaling TCP (fallback)
+      - "10000-10100:10000-10100/udp"  # RTP media port range
+    volumes:
+      # Mount SIP-specific config
+      - ./livekit/sip/config.yaml:/sip/config.yaml:ro
+    environment:
+      # These OVERRIDE values in config.yaml if both are set
+      # Keeping them explicit ensures the container starts even if mount fails
+      LIVEKIT_URL: "ws://livekit-server:7880"
+      LIVEKIT_API_KEY: "devkey"
+      LIVEKIT_API_SECRET: "secret"
+      # SIP service logging level
+      SLOG_LEVEL: "info"
+    depends_on:
+      livekit-server:
+        condition: service_started
+      redis:
+        condition: service_started
+    restart: unless-stopped
+
+  # ── Koyal Worker (livekit-agents) ──────────────────────────────────────
+  # Long-lived worker process that registers with livekit-server.
+  # Dispatches one JobContext (one audio bridge) per incoming room.
+  #
+  # Scales horizontally: run N workers for N concurrent calls.
+  # HPA target in: koyal_active_calls Prometheus metric.
+  #
+  # Entrypoint: backend/telephony/worker.py
+  #   - Uses livekit-agents WorkerOptions + cli.run_app()
+  #   - Creates LiveKitAudioBridge per room
+  #   - Runs full STT → LangGraph → TTS pipeline
+  #
+  # Depends on: livekit-server (signaling), qdrant (RAG), redis (sessions)
+  # koyal-worker:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile.backend
+  #   container_name: koyal_livekit_worker
+  #   command:
+  #     - "python"
+  #     - "-m"
+  #     - "backend.telephony.worker"
+  #     - "start"
+  #   env_file: .env
+  #   environment:
+  #     # LiveKit connection (must match livekit-server keys:)
+  #     LIVEKIT_URL: "ws://livekit-server:7880"
+  #     LIVEKIT_API_KEY: "devkey"
+  #     LIVEKIT_API_SECRET: "secret"
+  #     QDRANT_HOST: qdrant
+  #     REDIS_HOST: redis
+  #   depends_on:
+  #     livekit-server:
+  #       condition: service_healthy
+  #     qdrant:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #   restart: unless-stopped
+  #   volumes:
+  #     - ./data:/app/data:ro
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # BACKEND 
+  # ═══════════════════════════════════════════════════════════════════════
+  # Uncomment for production deployment where uvicorn runs in container.
+  # For development: run `uvicorn backend.main:app --reload --port 8000`
+  # separately so FastAPI auto-reload works with host filesystem changes.
+  #
   # backend:
   #   build:
   #     context: .
@@ -277,12 +433,19 @@ services:
   #     LANGFUSE_HOST: "http://langfuse-web:3000"
   #     LANGFUSE_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-pk-lf-koyalai-local}
   #     LANGFUSE_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-sk-lf-koyalai-local}
+  #     # LiveKit credentials for SIP provisioning and token issuance
+  #     LIVEKIT_API_KEY: "devkey"
+  #     LIVEKIT_API_SECRET: "secret"
+  #     LIVEKIT_WS_URL: "ws://livekit-server:7880"
+  #     LIVEKIT_SIP_TRUNK_ID: ${LIVEKIT_SIP_TRUNK_ID:-}
   #   depends_on:
   #     qdrant:
   #       condition: service_healthy
   #     redis:
   #       condition: service_healthy
   #     langfuse-web:
+  #       condition: service_healthy
+  #     livekit-server:
   #       condition: service_healthy
   #   restart: unless-stopped
   #   volumes:

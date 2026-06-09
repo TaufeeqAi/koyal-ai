@@ -16,11 +16,12 @@ from backend.config import (
     QDRANT_QUERY_MAX_RETRIES,
     RERANK_TOP_K,
     SCORE_THRESHOLD,
+    SKIP_RERANKER,
     TOP_K_RETRIEVAL,
     QDRANT_TIMEOUT,
     RERANKER_MODEL,
 )
-from backend.rag.embedder import MultilingualEmbedder
+from backend.rag.embedder import MultilingualEmbedder, get_embedder
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +39,9 @@ class MultilingualRetriever:
             host=QDRANT_HOST,
             port=QDRANT_PORT,
             timeout=QDRANT_TIMEOUT,
+            prefer_grpc=False,
         )
-        self._embedder = MultilingualEmbedder()
+        self._embedder = get_embedder()
         logger.info("Loading multilingual cross-encoder: %s", RERANKER_MODEL)
         self._reranker = CrossEncoder(RERANKER_MODEL, device="cpu")
         logger.info("Cross-encoder loaded.")
@@ -146,15 +148,20 @@ class MultilingualRetriever:
             for pt in scored_points
         ]
 
-        # ── Stage 2: Cross-encoder reranking ──
-        if len(chunks) > 1:
-            pairs = [[query, c["text"]] for c in chunks]
-            rerank_scores: list[float] = self._reranker.predict(pairs).tolist()
-            for chunk, rs in zip(chunks, rerank_scores):
-                chunk["rerank_score"] = float(rs)
+        # ── Stage 2: Cross-encoder reranking 
+        if SKIP_RERANKER:
+            for chunk in chunks:
+                chunk["rerank_score"] = chunk["score"]
             chunks.sort(key=lambda x: x["rerank_score"], reverse=True)
         else:
-            chunks[0]["rerank_score"] = chunks[0]["score"]
+            if len(chunks) > 1:
+                pairs = [[query, c["text"]] for c in chunks]
+                rerank_scores: list[float] = self._reranker.predict(pairs).tolist()
+                for chunk, rs in zip(chunks, rerank_scores):
+                    chunk["rerank_score"] = float(rs)
+                chunks.sort(key=lambda x: x["rerank_score"], reverse=True)
+            else:
+                chunks[0]["rerank_score"] = chunks[0]["score"]
 
         top_chunks = chunks[:RERANK_TOP_K]
         logger.debug(
@@ -201,3 +208,15 @@ class MultilingualRetriever:
             parts.append(f"{header}\n{chunk['text']}")
 
         return "\n\n".join(parts)
+    
+
+# Module-level singleton — process-local, thread-safe
+_retriever_instance: MultilingualRetriever | None = None
+
+
+def get_retriever() -> MultilingualRetriever:
+    """Return the process-wide MultilingualRetriever, creating it on first call."""
+    global _retriever_instance
+    if _retriever_instance is None:
+        _retriever_instance = MultilingualRetriever()
+    return _retriever_instance

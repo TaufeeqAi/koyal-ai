@@ -1,0 +1,107 @@
+# LiveKit Server Configuration — KoyalAI 
+#
+# What this controls:
+#   • WebRTC signaling (WebSocket on :7880)
+#   • TURN/STUN NAT traversal for browser ↔ agent media
+#   • Room lifecycle (auto-create, empty timeout, participant limits)
+#   • API key pairs for JWT signing (agent tokens, caller tokens, webhooks)
+#   • Integration with livekit-sip container for PSTN bridging
+#
+# Container mount:  ./livekit/livekit.yaml:/etc/livekit.yaml:ro
+# Binary:          livekit-server --config /etc/livekit.yaml --dev --node-ip host.docker.internal
+#
+# Architecture:
+#   Browser/SIP caller ──► livekit-server:7880 (WebSocket)
+#                              │
+#                              ▼
+#                        WebRTC signaling + DTLS
+#                              │
+#                              ▼
+#                        KoyalRoom (agent) + SIP bridge
+#                              │
+#                              ▼
+#                        UDP media path (host.docker.internal:7882)
+#
+# Production changes required:
+#   1. Replace devkey:secret with cryptographically random values (32+ bytes each)
+#   2. Set use_external_ip: true and provide public_ip or STUN discovery
+#   3. Add TURN server credentials for production NAT traversal
+#   4. Remove --dev flag; use --node-ip <your-public-ip>
+#   5. Enable TLS on port 7880 (wss://)
+#   6. Restrict keys: to specific tenant API keys, not a single dev pair
+#   7. Add webhook URL for room events: webhook: { urls: ["https://api.koyalai.io/telephony/livekit/webhook"] }
+#   8. Increase room.empty_timeout for long BFSI calls (e.g. 300s)
+# ───────────────────────────────────────────────────────────────────────────
+
+# HTTP/WebSocket signaling port
+port: 7880
+
+# WebRTC media transport
+rtc:
+  # TCP fallback port (when UDP is blocked by corporate firewall)
+  tcp_port: 7881
+  
+  # Primary UDP port for SRTP media (RTP/RTCP multiplex)
+  udp_port: 7882
+  
+  # External IP discovery — FALSE in dev (Docker host networking)
+  # Production: set true + provide public_ip or use STUN
+  use_external_ip: false
+   
+  # Production TURN server (uncomment when ready)
+  # turn:
+  #   enabled: true
+  #   domain: turn.koyalai.io
+  #   secret: ${LIVEKIT_TURN_SECRET}
+
+# API key:secret pairs for JWT token signing
+# Format: "key_id: secret_value" (key_id is public, secret is private)
+# The key_id "devkey" is referenced in:
+#   • backend/config.py (LIVEKIT_API_KEY / LIVEKIT_API_SECRET)
+#   • livekit/sip/config.yaml (LIVEKIT_API_KEY / LIVEKIT_API_SECRET env vars)
+#   • docker-compose.yml (livekit-server LIVEKIT_KEYS, livekit-sip env vars)
+#
+# Security: secret must be ≥32 random bytes. Generate: openssl rand -base64 32
+keys:
+  devkey: secret
+
+# Redis — REQUIRED for SIP bridge coordination
+# Without this, livekit-server uses single-node routing and SIP API calls fail
+redis:
+  address: redis:6379
+
+# Logging configuration
+logging:
+  level: info
+  # Pion WebRTC library log level (very verbose; keep at error in prod)
+  pion_level: error
+  # Sample 10% of logs at debug level (reduces volume)
+  sample: false
+
+# Room management
+room:
+  # Auto-create rooms when first participant joins (required for webhook flow)
+  auto_create: true
+  
+  # Delete empty rooms after N seconds of no participants
+  # Dev: 60s (quick cleanup)
+  # Production BFSI calls: increase to 300s (5 min) for long hold times
+  empty_timeout: 60
+  
+  # Maximum participants per room (agent + caller + optional supervisor)
+  # Inbound: 2 (agent + caller)
+  # Outbound: 2 (agent + callee)
+  # Conference: increase if adding supervisor whisper channel
+  max_participants: 10
+
+# Webhook configuration (inbound calls)
+# LiveKit POSTs room_started / room_finished / participant_left events here
+# The signature is validated by api.WebhookReceiver in inbound_handler.py
+# 
+# Uncomment when backend is deployed and reachable:
+webhook:
+  urls:
+     - "http://host.docker.internal:8000/telephony/livekit/webhook"  
+    # - "http://192.168.1.36:8000/telephony/livekit/webhook"
+  # API key used to sign webhook JWT (must match a key in keys: section)
+  api_key: devkey

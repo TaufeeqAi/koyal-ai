@@ -52,7 +52,11 @@ from typing import Any, Optional
 from nemoguardrails import LLMRails, RailsConfig
 
 from backend.agents.state import AgentState
-from backend.config import GROQ_API_KEY, load_tenant_config
+from backend.config import (
+    GROQ_API_KEY,
+    GUARDRAIL_GROQ_API_KEY,  
+    load_tenant_config,
+)
 from backend.exceptions import (
     ConfigValidationError,
     KoyalAIError,
@@ -159,7 +163,7 @@ class GuardrailsHandler:
         groq_api_key: str | None = None,
     ) -> None:
         self._config_path = Path(config_path) if config_path else _CONFIG_DIR
-        self._groq_api_key = groq_api_key or GROQ_API_KEY
+        self._groq_api_key = groq_api_key or GUARDRAIL_GROQ_API_KEY
         self._rails_available = False
         self._rails: LLMRails | None = None
 

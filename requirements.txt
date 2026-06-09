@@ -20,9 +20,11 @@ soundfile==0.13.1
 numpy==2.4.6
 aiohttp==3.13.5
 
-# # Telephony 
-# livekit==1.1.8
-# livekit-agents==1.5.12
+# Telephony 
+livekit==1.1.9
+livekit-agents==1.5.16
+livekit-api==1.1.0
+livekit-plugins-silero==1.5.16
 
 # Safety
 nemoguardrails==0.20.0

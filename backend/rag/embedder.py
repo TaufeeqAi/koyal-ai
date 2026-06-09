@@ -10,6 +10,7 @@ from backend.config import EMBEDDING_BATCH_SIZE, EMBEDDING_DIMENSION, EMBEDDING_
 
 logger = logging.getLogger(__name__)
 
+_embedder_instance: MultilingualEmbedder | None = None
 
 class MultilingualEmbedder:
     """
@@ -80,3 +81,10 @@ class MultilingualEmbedder:
             convert_to_numpy=True,
         )[0]
         return vector.tolist()
+
+def get_embedder() -> MultilingualEmbedder:
+    """Return the process-wide MultilingualEmbedder, creating it on first call."""
+    global _embedder_instance
+    if _embedder_instance is None:
+        _embedder_instance = MultilingualEmbedder()
+    return _embedder_instance

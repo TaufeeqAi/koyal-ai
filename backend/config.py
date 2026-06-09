@@ -22,6 +22,8 @@ LANGFUSE_PUBLIC_KEY: str = os.getenv("LANGFUSE_PUBLIC_KEY", "")
 LANGFUSE_SECRET_KEY: str = os.getenv("LANGFUSE_SECRET_KEY", "")
 LANGFUSE_HOST: str = os.getenv("LANGFUSE_HOST", "http://localhost:3001")
 
+GUARDRAIL_GROQ_API_KEY: str = os.getenv("GUARDRAIL_GROQ_API_KEY", "")
+
 # ── LiveKit 
 LIVEKIT_API_KEY: str = os.getenv("LIVEKIT_API_KEY", "devkey")
 LIVEKIT_API_SECRET: str = os.getenv("LIVEKIT_API_SECRET", "secret")
@@ -48,10 +50,10 @@ EMBEDDING_DIMENSION: int = 768
 EMBEDDING_BATCH_SIZE: int = 16  # CPU-safe default; override at runtime if needed
 
 # ── ReRanker 
-RERANKER_MODEL: str = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
+RERANKER_MODEL: str = "mixedbread-ai/mxbai-rerank-base-v2"
 
 # ── Qdrant
-QDRANT_TIMEOUT: int = int(os.getenv("QDRANT_TIMEOUT", "20"))
+QDRANT_TIMEOUT: int = int(os.getenv("QDRANT_TIMEOUT", "60"))
 QDRANT_QUERY_MAX_RETRIES: int = int(
     os.getenv("QDRANT_QUERY_MAX_RETRIES", "3")
 )
@@ -65,7 +67,7 @@ CHUNK_SIZE: int = 400
 CHUNK_OVERLAP: int = 40
 
 # ── Retrieval 
-TOP_K_RETRIEVAL: int = 10
+TOP_K_RETRIEVAL: int = 3
 RERANK_TOP_K: int = 3
 SCORE_THRESHOLD: float = 0.15  # Lower than monolingual due to cross-lingual gap
 
@@ -81,10 +83,10 @@ TENANTS: list[str] = ["tenant_hdfc_bank", "tenant_swiggy_support"]
 
 # ── LLM Config (Groq) 
 
-GROQ_MODEL_NAME: str = os.getenv("GROQ_MODEL_NAME", "llama-3.3-70b-versatile")
+GROQ_MODEL_NAME: str = os.getenv("GROQ_MODEL_NAME", "llama-3.1-8b-instant")
 GROQ_TEMPERATURE: float = float(os.getenv("GROQ_TEMPERATURE", "0"))
 GROQ_MAX_TOKENS: int = int(os.getenv("GROQ_MAX_TOKENS", "1024"))
-GROQ_TIMEOUT: int = int(os.getenv("GROQ_TIMEOUT", "30"))
+GROQ_TIMEOUT: int = int(os.getenv("GROQ_TIMEOUT", "60"))
 
 # ── LLM Config (Gemini) 
 
@@ -104,10 +106,18 @@ SARVAM_BACKOFF_BASE: float = float(os.getenv("SARVAM_BACKOFF_BASE", "2.0"))
 
 # ── Sarvam Voice Mapping 
 SARVAM_VOICE_MAP: dict[str, str] = {
-    "hi-IN": "meera",
-    "en-IN": "anushka",
-    "hi-IN+en-IN": "meera",
+    "hi-IN":       "shubh",    # Hindi — neutral, clear
+    "en-IN":       "shubh",    # Indian English
+    "hi-IN+en-IN": "shubh",    # Hinglish — shubh handles code-mixing well
+    "mr-IN":       "shubh",    # Marathi fallback
+    "ta-IN":       "shubh",    # Tamil fallback
+    "te-IN":       "shubh",    # Telugu fallback
+    "kn-IN":       "shubh",    # Kannada fallback
+    "bn-IN":       "shubh",    # Bengali fallback
+    "gu-IN":       "shubh",    # Gujarati fallback
+    "pa-IN":       "shubh",    # Punjabi fallback
 }
+DEFAULT_VOICE: str = "shubh"
 
 # ── Safety Thresholds 
 
@@ -134,20 +144,28 @@ GUARDRAILS_ENABLED: bool = os.getenv("GUARDRAILS_ENABLED", "true").lower() in ("
 
 
 # ── STT 
-STT_MODEL: str = os.getenv("STT_MODEL", "saaras:v2")
+STT_MODEL: str = os.getenv("STT_MODEL", "saaras:v3")
 STT_TIMEOUT: int = int(os.getenv("STT_TIMEOUT", "15"))
 STT_MAX_RETRIES: int = int(os.getenv("STT_MAX_RETRIES", "3"))
 STT_BACKOFF_BASE: float = float(os.getenv("STT_BACKOFF_BASE", "2.0"))
 STT_CONFIDENCE_THRESHOLD: float = float(os.getenv("STT_CONFIDENCE_THRESHOLD", "0.4"))
 
 # ── TTS 
-TTS_MODEL: str = os.getenv("TTS_MODEL", "bulbul:v1")
+TTS_MODEL: str = os.getenv("TTS_MODEL", "bulbul:v3")
 TTS_TIMEOUT: int = int(os.getenv("TTS_TIMEOUT", "10"))
 TTS_MAX_RETRIES: int = int(os.getenv("TTS_MAX_RETRIES", "3"))
 TTS_BACKOFF_BASE: float = float(os.getenv("TTS_BACKOFF_BASE", "2.0"))
 TTS_PACE: float = float(os.getenv("TTS_PACE", "1.0"))
-TTS_SAMPLE_RATE: int = int(os.getenv("TTS_SAMPLE_RATE", "16000"))
+TTS_SAMPLE_RATE: int = int(os.getenv("TTS_SAMPLE_RATE", "24000"))
 TTS_MAX_CHARS_PER_CHUNK: int = int(os.getenv("TTS_MAX_CHARS_PER_CHUNK", "500"))
+
+
+# Model-specific config flags (used by tts.py to decide payload shape)
+TTS_SUPPORTS_PITCH: bool = False      
+TTS_SUPPORTS_LOUDNESS: bool = False  
+TTS_SUPPORTS_TEMPERATURE: bool = True 
+TTS_TEMPERATURE: float = 0.6          
+TTS_PREPROCESSING_ALWAYS_ENABLED: bool = True 
 
 # ── VAD 
 VAD_AGGRESSIVENESS: int = int(os.getenv("VAD_AGGRESSIVENESS", "2"))
@@ -157,12 +175,22 @@ VAD_FRAME_DURATION_MS: int = int(os.getenv("VAD_FRAME_DURATION_MS", "30"))
 # WebRTC VAD accepts: 10ms, 20ms, or 30ms frames only.
 VAD_SPEECH_THRESHOLD: int = int(os.getenv("VAD_SPEECH_THRESHOLD", "8"))
 # Consecutive voiced frames before declaring speech start.
-VAD_SILENCE_THRESHOLD: int = int(os.getenv("VAD_SILENCE_THRESHOLD", "25"))
+VAD_SILENCE_THRESHOLD: int = int(os.getenv("VAD_SILENCE_THRESHOLD", "50"))
 # Consecutive silent frames before declaring utterance end (25 × 30ms = 750ms).
 VAD_MIN_SPEECH_FRAMES: int = int(os.getenv("VAD_MIN_SPEECH_FRAMES", "5"))
 # Minimum voiced frames to count as utterance (filters noise bursts).
 VAD_ENERGY_THRESHOLD: float = float(os.getenv("VAD_ENERGY_THRESHOLD", "200.0"))
 # RMS energy below this → forced silence (energy guard secondary to webrtcvad).
+
+# ── VAD Fallback & Safety Caps 
+# When VAD fails, fallback buffer flushes after N seconds of continuous audio.
+FALLBACK_BUFFER_SECONDS: int = int(os.getenv("FALLBACK_BUFFER_SECONDS", "3"))
+# Absolute safety cap: force flush after N seconds regardless of VAD state.
+MAX_UTTERANCE_SECONDS: int = int(os.getenv("MAX_UTTERANCE_SECONDS", "30"))
+
+# Derived byte thresholds (16kHz mono int16 = 32000 bytes/sec)
+FALLBACK_BUFFER_THRESHOLD: int = VAD_SAMPLE_RATE * 2 * FALLBACK_BUFFER_SECONDS
+MAX_UTTERANCE_BYTES: int = VAD_SAMPLE_RATE * 2 * MAX_UTTERANCE_SECONDS
 
 # ── Session 
 SESSION_TIMEOUT_SECONDS: int = int(os.getenv("SESSION_TIMEOUT_SECONDS", "300"))
@@ -170,6 +198,7 @@ MAX_CONCURRENT_SESSIONS: int = int(os.getenv("MAX_CONCURRENT_SESSIONS", "100"))
 
 # ── Outbound 
 OUTBOUND_MAX_CONCURRENT: int = int(os.getenv("OUTBOUND_MAX_CONCURRENT", "5"))
+PRE_SYNTHESIZE_GREETING: bool = os.getenv("PRE_SYNTHESIZE_GREETING", "true").lower() == "true"
 
 # ── Cost rates (₹) 
 STT_COST_PER_MINUTE: float = float(os.getenv("STT_COST_PER_MINUTE", "0.50"))
@@ -182,6 +211,12 @@ STT_COST_PER_SECOND = STT_COST_PER_MINUTE / 60.0
 WS_RECEIVE_TIMEOUT: float = float(os.getenv("WS_RECEIVE_TIMEOUT", "0.1"))
 WS_GREETING_ENABLED: bool = os.getenv("WS_GREETING_ENABLED", "true").lower() == "true"
 
+
+# ── Latency optimization flags
+SKIP_RERANKER: bool = os.getenv("SKIP_RERANKER", "true").lower() in ("true", "1", "yes")
+SKIP_VERIFICATION: bool = os.getenv("SKIP_VERIFICATION", "true").lower() in ("true", "1", "yes")
+SKIP_TRANSLATION: bool = os.getenv("SKIP_TRANSLATION", "true").lower() in ("true", "1", "yes")
+PIPELINE_TIMEOUT_SECONDS: float = float(os.getenv("PIPELINE_TIMEOUT_SECONDS", "60.0"))
 
 
 def load_tenant_config(tenant_id: str) -> dict:
