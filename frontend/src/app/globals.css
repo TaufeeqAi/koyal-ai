@@ -1,0 +1,143 @@
+/* ── Tailwind CSS v3 directives ──────────────────────────────────────────── */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Google Fonts (Devanagari) ─────────────────────────────────────────── */
+@font-face {
+  font-family: 'Noto Sans Devanagari';
+  font-style: normal;
+  font-weight: 400 600;
+  font-display: swap;
+  src: url('https://fonts.gstatic.com/s/notosansdevanagari/v26/TuGOUUFzXI5FBtUq5a8bg4O8VaP3sD5R3Tbc-V0PDC8hKpI.woff2') format('woff2');
+}
+
+/* ── Devanagari text rendering ─────────────────────────────────────────── */
+.devanagari {
+  font-family: 'Noto Sans Devanagari', 'Mangal', sans-serif;
+  line-height: 1.8;
+}
+
+/* ── CSS custom properties ───────────────────────────────────────────────── */
+:root {
+  /* Colour tokens (mirrors Tailwind config for use in vanilla CSS) */
+  --color-bg:        #05060d;
+  --color-surface:   #0a0f1e;
+  --color-card:      #0f1629;
+  --color-border:    #1e2d52;
+  --color-koyal:     #22d3ee;
+  --color-koyal-dim: #0891b2;
+  --color-text:      #e2e8f0;
+  --color-muted:     #64748b;
+  --color-success:   #34d399;
+  --color-warning:   #fbbf24;
+  --color-error:     #f87171;
+
+  /* Language accent tokens */
+  --color-lang-hi:      #fb923c;
+  --color-lang-en:      #60a5fa;
+  --color-lang-hinglish:#a78bfa;
+}
+
+/* ── Base styles ─────────────────────────────────────────────────────────── */
+* {
+  box-sizing: border-box;
+  padding: 0;
+  margin: 0;
+}
+
+html {
+  /* Force dark mode — ops dashboards are always dark */
+  color-scheme: dark;
+  scroll-behavior: smooth;
+}
+
+body {
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sora, 'system-ui'), sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  /* Subtle grid overlay — mission control aesthetic */
+  background-image:
+    linear-gradient(rgba(30, 45, 82, 0.25) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(30, 45, 82, 0.25) 1px, transparent 1px);
+  background-size: 40px 40px;
+  min-height: 100vh;
+}
+
+/* ── Scrollbar styling ───────────────────────────────────────────────────── */
+::-webkit-scrollbar       { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #1e2d52; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #22d3ee40; }
+
+/* ── Selection ───────────────────────────────────────────────────────────── */
+::selection { background: rgba(34, 211, 238, 0.2); color: #e2e8f0; }
+
+/* ── Focus ring ──────────────────────────────────────────────────────────── */
+:focus-visible {
+  outline: 2px solid var(--color-koyal);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* ── Utility classes ─────────────────────────────────────────────────────── */
+@layer utilities {
+  .text-gradient-koyal {
+    background: linear-gradient(135deg, #22d3ee 0%, #818cf8 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .border-koyal-subtle {
+    border: 1px solid rgba(34, 211, 238, 0.12);
+  }
+  .bg-card-gradient {
+    background: linear-gradient(135deg, #0f1629 0%, #141d35 100%);
+  }
+  .font-mono-data {
+    font-family: var(--font-jbmono, 'ui-monospace'), monospace;
+    font-feature-settings: 'tnum' 1;
+    font-variant-numeric: tabular-nums;
+  }
+  /* Fade in animation */
+  .animate-fade-in {
+    animation: fadeIn 0.2s ease-out forwards;
+  }
+  /* Pulsing dot animation (for live status indicators) */
+  .animate-pulse-dot {
+    animation: pulseDot 1.5s ease-in-out infinite;
+  }
+}
+
+/* ── Keyframes ────────────────────────────────────────────────────────────── */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulseDot {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.5;
+    transform: scale(0.9);
+  }
+}
+
+/* ── LiveKit components overrides ────────────────────────────────────────── */
+/* Override livekit-components-react default light styles */
+[data-lk-theme] {
+  --lk-bg: transparent !important;
+  --lk-control-bar-bg: #0f1629 !important;
+}
+
