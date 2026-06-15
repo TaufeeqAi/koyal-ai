@@ -86,7 +86,7 @@ class DialResult:
     room_name: str
     tenant_id: str
     language: str
-    status: str = "dialing"
+    status: str = "dialing"    # can be "dialing", "failed", "skipped", "error"
     sip_call_id: Optional[str] = None
     participant_identity: Optional[str] = None
     setup_duration_ms: float = 0.0
@@ -101,6 +101,67 @@ class CampaignResult:
     skipped: int
     results: list[DialResult] = field(default_factory=list)
 
+
+class CampaignContact(BaseModel):
+    phone: str
+    name: Optional[str] = None
+
+    model_config = {
+        "extra": "allow"
+    }
+
+
+class CampaignRequest(BaseModel):
+    tenant_id: str
+    contacts: list[CampaignContact]
+    script_template: str = Field(min_length=1, max_length=5000)
+    language: str = Field(default="hi-IN")
+    max_concurrent: int = Field(default=5, ge=1, le=50)
+
+    @field_validator("tenant_id")
+    @classmethod
+    def tenant_must_be_known(cls, v: str) -> str:
+        from backend.config import TENANTS
+
+        if v not in TENANTS:
+            raise ValueError(f"Unknown tenant_id '{v}'")
+
+        return v
+    
+    @field_validator("max_concurrent")
+    @classmethod
+    def concurrent_range(cls, v: int) -> int:
+        if not (1 <= v <= 50):
+            raise ValueError("max_concurrent must be between 1 and 50")
+        return v
+    
+# --serializer helpers 
+
+def _dial_result_to_dict(result: DialResult) -> dict:
+    return {
+        "session_id": result.session_id,
+        "phone": result.phone,
+        "room_name": result.room_name,
+        "tenant_id": result.tenant_id,
+        "language": result.language,
+        "status": result.status,
+        "sip_call_id": result.sip_call_id,
+        "setup_duration_ms": result.setup_duration_ms,
+        "error": result.error,
+    }
+
+
+def _campaign_result_to_dict(result: CampaignResult) -> dict:
+    return {
+        "total": result.total,
+        "dialing": result.dialing,
+        "failed": result.failed,
+        "skipped": result.skipped,
+        "results": [
+            _dial_result_to_dict(r)
+            for r in result.results
+        ],
+    }
 
 # ── LiveKitSIPOutbound 
 
@@ -238,14 +299,17 @@ class LiveKitSIPOutbound:
                 return await self._dial_one_contact(contact, template, language)
 
         tasks = [asyncio.create_task(dial_one(c)) for c in contacts]
-        results = await asyncio.gather(*tasks)  # No return_exceptions=True
-
+        results = await asyncio.gather(
+            *tasks,
+            return_exceptions=True,
+        )  
+        valid_results = [r for r in results if isinstance(r, DialResult)]
         return CampaignResult(
             total=len(contacts),
-            dialing=sum(1 for r in results if r.status == "dialing"),
-            failed=sum(1 for r in results if r.status == "failed"),
-            skipped=sum(1 for r in results if r.status == "skipped"),
-            results=results,
+            dialing=sum(1 for r in valid_results if r.status == "dialing"),
+            failed=sum(1 for r in valid_results if r.status in ("failed", "error")),
+            skipped=sum(1 for r in valid_results if r.status == "skipped"),
+            results=valid_results,
         )
 
     async def _dial_one_contact(self, contact, template, language):
@@ -267,7 +331,7 @@ class LiveKitSIPOutbound:
             return DialResult(
                 session_id=str(uuid.uuid4()), phone=contact.get("phone", "unknown"),
                 room_name="", tenant_id=contact.get("tenant_id", "unknown"),
-                language=language, status="failed", error=str(exc),
+                language=language, status="error", error=str(exc),
             )
 
     async def _hangup_sip_call(self, room_name, participant_identity):
@@ -347,3 +411,37 @@ async def outbound_ready():
     except Exception as exc:
         logger.warning("Outbound readiness probe failed: %s", exc)
         raise HTTPException(status_code=503, detail={"status": "degraded", "reason": str(exc)})
+    
+
+@router.post("/campaign")
+async def launch_campaign(req: CampaignRequest):
+    """
+    Launch an outbound SIP campaign.
+
+    Returns immediately after all dial attempts are initiated.
+    Individual calls continue asynchronously inside LiveKit.
+    """
+    try:
+        contacts = []
+
+        for contact in req.contacts:
+            payload = contact.model_dump()
+            payload["tenant_id"] = req.tenant_id
+            contacts.append(payload)
+
+        async with LiveKitSIPOutbound() as dialer:
+            result = await dialer.dial_campaign(
+                contacts=contacts,
+                script_template=req.script_template,
+                language=req.language,
+                max_concurrent=req.max_concurrent,
+            )
+
+        return _campaign_result_to_dict(result)
+
+    except Exception as exc:
+        logger.exception("Campaign launch failed")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Campaign launch failed: {exc}",
+        )

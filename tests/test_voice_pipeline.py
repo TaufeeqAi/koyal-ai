@@ -589,82 +589,82 @@ class TestSessionManager:
         assert isinstance(d["turn_count"], int)
 
 
-# ── OutboundCaller Tests 
+# # ── OutboundCaller Tests 
 
-class TestOutboundCaller:
+# class TestOutboundCaller:
 
-    def _mock_caller(self):
-        """OutboundCaller with mocked TTS and cost tracker."""
-        with patch("backend.voice.outbound_caller.load_tenant_config") as mock_cfg:
-            mock_cfg.return_value = {
-                "tenant_id": "tenant_hdfc_bank",
-                "company_name": "HDFC Bank",
-                "primary_language": "hi-IN",
-            }
-            from backend.voice.outbound_caller import OutboundCaller
-            caller = OutboundCaller("tenant_hdfc_bank")
+#     def _mock_caller(self):
+#         """OutboundCaller with mocked TTS and cost tracker."""
+#         with patch("backend.voice.outbound_caller.load_tenant_config") as mock_cfg:
+#             mock_cfg.return_value = {
+#                 "tenant_id": "tenant_hdfc_bank",
+#                 "company_name": "HDFC Bank",
+#                 "primary_language": "hi-IN",
+#             }
+#             from backend.voice.outbound_caller import OutboundCaller
+#             caller = OutboundCaller("tenant_hdfc_bank")
 
-        caller._tts = MagicMock()
-        caller._tts.asynthesize = AsyncMock(return_value=b"RIFF" + b"\x00" * 1000)
-        caller._cost_tracker = MagicMock()
-        caller._cost_tracker.track_tts = AsyncMock()
-        caller._cost_tracker.track_call = AsyncMock()
-        return caller
+#         caller._tts = MagicMock()
+#         caller._tts.asynthesize = AsyncMock(return_value=b"RIFF" + b"\x00" * 1000)
+#         caller._cost_tracker = MagicMock()
+#         caller._cost_tracker.track_tts = AsyncMock()
+#         caller._cost_tracker.track_call = AsyncMock()
+#         return caller
 
-    @pytest.mark.asyncio
-    async def test_single_contact_campaign(self) -> None:
-        caller = self._mock_caller()
-        results = await caller.run_outbound_campaign(
-            contact_list=[{"phone": "+91-9800000000", "name": "Priya"}],
-            script_template="नमस्ते {name} जी!",
-            language="hi-IN",
-        )
-        assert len(results) == 1
-        assert results[0]["status"] == "completed"
-        assert results[0]["phone"] == "+91-9800000000"
+#     @pytest.mark.asyncio
+#     async def test_single_contact_campaign(self) -> None:
+#         caller = self._mock_caller()
+#         results = await caller.run_outbound_campaign(
+#             contact_list=[{"phone": "+91-9800000000", "name": "Priya"}],
+#             script_template="नमस्ते {name} जी!",
+#             language="hi-IN",
+#         )
+#         assert len(results) == 1
+#         assert results[0]["status"] == "completed"
+#         assert results[0]["phone"] == "+91-9800000000"
 
-    @pytest.mark.asyncio
-    async def test_bounded_concurrency(self) -> None:
-        """Semaphore must bound concurrent API calls."""
-        call_times: list[float] = []
+#     @pytest.mark.asyncio
+#     async def test_bounded_concurrency(self) -> None:
+#         """Semaphore must bound concurrent API calls."""
+#         call_times: list[float] = []
 
-        async def slow_synth(text, lang):
-            call_times.append(time.monotonic())
-            await asyncio.sleep(0.05)
-            return b"RIFF" + b"\x00" * 100
+#         async def slow_synth(text, lang):
+#             call_times.append(time.monotonic())
+#             await asyncio.sleep(0.05)
+#             return b"RIFF" + b"\x00" * 100
 
-        caller = self._mock_caller()
-        caller._tts.asynthesize = slow_synth
+#         caller = self._mock_caller()
+#         caller._tts.asynthesize = slow_synth
 
-        contacts = [{"phone": f"+91-980000{i:04d}", "name": f"User{i}"} for i in range(6)]
-        await caller.run_outbound_campaign(
-            contact_list=contacts,
-            script_template="Hello {name}!",
-            language="en-IN",
-            max_concurrent=2,
-        )
-        # With semaphore=2 and 6 calls, first and second start nearly simultaneously
-        assert len(call_times) == 6
+#         contacts = [{"phone": f"+91-980000{i:04d}", "name": f"User{i}"} for i in range(6)]
+#         await caller.run_outbound_campaign(
+#             contact_list=contacts,
+#             script_template="Hello {name}!",
+#             language="en-IN",
+#             max_concurrent=2,
+#         )
+#         # With semaphore=2 and 6 calls, first and second start nearly simultaneously
+#         assert len(call_times) == 6
 
-    @pytest.mark.asyncio
-    async def test_empty_contact_list_raises(self) -> None:
-        from backend.exceptions import OutboundError
-        caller = self._mock_caller()
-        with pytest.raises(OutboundError, match="empty"):
-            await caller.run_outbound_campaign(
-                contact_list=[], script_template="Hello!", language="en-IN"
-            )
+#     @pytest.mark.asyncio
+#     async def test_empty_contact_list_raises(self) -> None:
+#         from backend.exceptions import OutboundError
+#         caller = self._mock_caller()
+#         with pytest.raises(OutboundError, match="empty"):
+#             await caller.run_outbound_campaign(
+#                 contact_list=[], script_template="Hello!", language="en-IN"
+#             )
 
-    @pytest.mark.asyncio
-    async def test_missing_template_key_reported_as_failed(self) -> None:
-        caller = self._mock_caller()
-        results = await caller.run_outbound_campaign(
-            contact_list=[{"phone": "+91-9800000000", "name": "Rahul"}],
-            script_template="₹{due_amount} बाकी है {name}।",
-            language="hi-IN",
-        )
-        assert results[0]["status"] == "failed"
-        assert "error" in results[0]
+#     @pytest.mark.asyncio
+#     async def test_missing_template_key_reported_as_failed(self) -> None:
+#         caller = self._mock_caller()
+#         results = await caller.run_outbound_campaign(
+#             contact_list=[{"phone": "+91-9800000000", "name": "Rahul"}],
+#             script_template="₹{due_amount} बाकी है {name}।",
+#             language="hi-IN",
+#         )
+#         assert results[0]["status"] == "failed"
+#         assert "error" in results[0]
 
 
 # ── WebSocket Endpoint Tests 

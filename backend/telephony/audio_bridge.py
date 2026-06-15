@@ -4,13 +4,23 @@ import asyncio
 import logging
 import time
 import uuid
-from typing import Optional
+from contextlib import suppress
+from datetime import UTC, datetime
+from typing import Literal, Optional
 
 from livekit import rtc
 
 from backend.agents.graph import koyal_graph
-from backend.exceptions import VoiceError
 from backend.agents.state import make_initial_state
+from backend.config import (
+    FALLBACK_BUFFER_THRESHOLD,
+    MAX_UTTERANCE_BYTES,
+    PIPELINE_TIMEOUT_SECONDS,
+    TTS_SAMPLE_RATE,
+    VAD_SAMPLE_RATE,
+    load_tenant_config,
+)
+from backend.exceptions import VoiceError
 from backend.observability.prometheus_metrics import (
     record_call_end,
     record_call_start,
@@ -23,34 +33,31 @@ from backend.observability.prometheus_metrics import (
     record_tts_latency,
     record_ttfr,
 )
-from backend.config import (
-    TTS_SAMPLE_RATE,
-    VAD_SAMPLE_RATE,
-    FALLBACK_BUFFER_THRESHOLD,
-    MAX_UTTERANCE_BYTES,
-    load_tenant_config,
-)
 from backend.telephony.audio_utils import pcm_to_wav, wav_to_pcm_frames
+from backend.telephony.transcript_manager import get_transcript_manager
+from backend.telephony.transcript_schema import TranscriptTurn
 from backend.voice.stt import SarvamSTT
 from backend.voice.tts import SarvamTTS
 from backend.voice.vad import SpeechSegmenter
-from backend.config import PIPELINE_TIMEOUT_SECONDS
 
 logger = logging.getLogger(__name__)
-
 
 # ── Pre-canned apology messages
 # Spoken when the pipeline fails to produce a response. Ensures the caller
 # hears something rather than dead air.
 _APOLOGY: dict[str, str] = {
-    "hi-IN":       "मुझे खेद है, मैं अभी ठीक से सुन नहीं पाया। कृपया फिर से बोलें।",
-    "en-IN":       "I'm sorry, I didn't catch that. Could you please repeat?",
+    "hi-IN": "मुझे खेद है, मैं अभी ठीक से सुन नहीं पाया। कृपया फिर से बोलें।",
+    "en-IN": "I'm sorry, I didn't catch that. Could you please repeat?",
     "hi-IN+en-IN": "Sorry, samajh nahi aaya. Please dobara bolein.",
 }
 _DEFAULT_APOLOGY_LANG: str = "en-IN"
 
 # ── Deduplication window: ignore same utterance for n seconds
-_UTTERANCE_DEDUP_SECONDS: float = 25
+_UTTERANCE_DEDUP_SECONDS: float = 25.0
+
+# ── Transcript delivery tuning
+_TRANSCRIPT_QUEUE_MAXSIZE: int = 512
+_TRANSCRIPT_SHUTDOWN_TIMEOUT_SECONDS: float = 2.0
 
 
 class LiveKitAudioBridge:
@@ -83,7 +90,7 @@ class LiveKitAudioBridge:
         self.call_type = call_type
         self.session_id: str = str(uuid.uuid4())
 
-        # voice pipeline components 
+        # voice pipeline components
         self.stt = SarvamSTT()
         self.tts = SarvamTTS()
         self._segmenter = SpeechSegmenter()
@@ -104,12 +111,22 @@ class LiveKitAudioBridge:
         self._last_transcript: str = ""
         self._last_transcript_time: float = 0.0
 
+        # Transcript sidecar
+        self._transcript_manager = get_transcript_manager()
+        self._transcript_queue: asyncio.Queue[TranscriptTurn | None] = asyncio.Queue(
+            maxsize=_TRANSCRIPT_QUEUE_MAXSIZE
+        )
+        self._transcript_worker_task: Optional[asyncio.Task[None]] = None
+
         logger.info(
             "LiveKitAudioBridge created: session=%s tenant=%s type=%s room=%s",
-            self.session_id, tenant_id, call_type, room.name,
+            self.session_id,
+            tenant_id,
+            call_type,
+            room.name,
         )
 
-    # ── Public API 
+    # ── Public API
 
     async def start(self) -> None:
         """Publish the agent's output track and subscribe to caller input.
@@ -137,7 +154,8 @@ class LiveKitAudioBridge:
             )
             logger.info(
                 "[%s] Published local audio track to room '%s'.",
-                self.session_id, self.room.name,
+                self.session_id,
+                self.room.name,
             )
         except Exception as exc:
             raise VoiceError(
@@ -145,6 +163,13 @@ class LiveKitAudioBridge:
                 session_id=self.session_id,
                 room=self.room.name,
             ) from exc
+
+        # Start transcript worker before any transcript events can be queued.
+        if self._transcript_worker_task is None or self._transcript_worker_task.done():
+            self._transcript_worker_task = asyncio.create_task(
+                self._transcript_worker(),
+                name=f"transcript-worker-{self.session_id[:8]}",
+            )
 
         # Subscribe to already-published remote tracks
         for participant in self.room.remote_participants.values():
@@ -172,10 +197,36 @@ class LiveKitAudioBridge:
         """
         if self._stop_event.is_set():
             return
-        
+
         self._stop_event.set()
         duration = time.monotonic() - self._start_time
         self._segmenter.reset()
+
+        # Drain transcript worker best-effort without hanging shutdown.
+        if self._transcript_worker_task is not None and not self._transcript_worker_task.done():
+            try:
+                self._transcript_queue.put_nowait(None)
+            except asyncio.QueueFull:
+                self._transcript_worker_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await self._transcript_worker_task
+            else:
+                try:
+                    await asyncio.wait_for(
+                        self._transcript_worker_task,
+                        timeout=_TRANSCRIPT_SHUTDOWN_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "[%s] Transcript worker shutdown timed out; cancelling.",
+                        self.session_id,
+                    )
+                    self._transcript_worker_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await self._transcript_worker_task
+                finally:
+                    self._transcript_worker_task = None
+
         record_call_end(
             self.tenant_id,
             self._detected_language,
@@ -185,10 +236,12 @@ class LiveKitAudioBridge:
         )
         logger.info(
             "[%s] AudioBridge stopped: outcome=%s duration=%.1fs",
-            self.session_id, outcome, duration,
+            self.session_id,
+            outcome,
+            duration,
         )
 
-    # ── Track subscription callbacks 
+    # ── Track subscription callbacks
 
     def _on_track_subscribed(
         self,
@@ -204,7 +257,8 @@ class LiveKitAudioBridge:
         if isinstance(track, rtc.RemoteAudioTrack):
             logger.info(
                 "[%s] Remote audio track subscribed from participant '%s'.",
-                self.session_id, participant.identity,
+                self.session_id,
+                participant.identity,
             )
             asyncio.get_event_loop().create_task(
                 self._receive_audio_track(track)
@@ -214,11 +268,12 @@ class LiveKitAudioBridge:
         """Handle unexpected room disconnection."""
         logger.warning(
             "[%s] Room '%s' disconnected unexpectedly.",
-            self.session_id, self.room.name,
+            self.session_id,
+            self.room.name,
         )
         asyncio.get_event_loop().create_task(self.stop(outcome="failed"))
 
-    # ── Audio receive loop 
+    # ── Audio receive loop
 
     async def _receive_audio_track(self, track: rtc.RemoteAudioTrack) -> None:
         """Stream audio frames from a remote track through the VAD pipeline.
@@ -254,16 +309,22 @@ class LiveKitAudioBridge:
                     self._fallback_buffer.clear()
                 logger.debug(
                     "[%s] Agent busy (speaking=%s processing=%s) — dropping %d bytes.",
-                    self.session_id, self._is_speaking, self._processing, len(audio_chunk)
+                    self.session_id,
+                    self._is_speaking,
+                    self._processing,
+                    len(audio_chunk),
                 )
                 continue
 
-            # ── VAD-based utterance detection 
+            # ── VAD-based utterance detection
             try:
                 vad_result = self._segmenter.process_chunk(audio_chunk)
                 if vad_result.utterance_complete and vad_result.speech_bytes:
                     if self._processing:
-                        logger.info("[%s] Already processing — dropping utterance.", self.session_id)
+                        logger.info(
+                            "[%s] Already processing — dropping utterance.",
+                            self.session_id,
+                        )
                         self._fallback_buffer.clear()
                         continue
                     self._processing = True
@@ -275,10 +336,11 @@ class LiveKitAudioBridge:
             except Exception as exc:
                 logger.warning(
                     "[%s] VAD error, falling back to time-based buffer: %s",
-                    self.session_id, exc,
+                    self.session_id,
+                    exc,
                 )
 
-            # ── Fallback: time-based buffer flush 
+            # ── Fallback: time-based buffer flush
             self._fallback_buffer.extend(audio_chunk)
 
             # 3-second threshold flush (normal fallback)
@@ -292,7 +354,7 @@ class LiveKitAudioBridge:
                     )
                 continue
 
-            # 30-second safety cap 
+            # 30-second safety cap
             # Handles continuous background noise where VAD never detects silence.
             if len(self._fallback_buffer) >= MAX_UTTERANCE_BYTES:
                 logger.warning(
@@ -307,19 +369,20 @@ class LiveKitAudioBridge:
                         self._process_utterance(audio_copy)
                     )
 
-    # ── Pipeline processing 
+    # ── Pipeline processing
 
     async def _process_utterance(self, speech_pcm: bytes) -> None:
         """Run STT → LangGraph → TTS with hard timeout and processing lock."""
         try:
             await asyncio.wait_for(
                 self._run_pipeline(speech_pcm),
-                timeout=PIPELINE_TIMEOUT_SECONDS
+                timeout=PIPELINE_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:
             logger.error(
                 "[%s] Pipeline timed out after %.0fs! Speaking apology.",
-                self.session_id, PIPELINE_TIMEOUT_SECONDS
+                self.session_id,
+                PIPELINE_TIMEOUT_SECONDS,
             )
             await self._speak_apology(self._detected_language)
         except Exception as exc:
@@ -328,7 +391,6 @@ class LiveKitAudioBridge:
         finally:
             self._processing = False
             self._fallback_buffer.clear()
-
 
     async def _run_pipeline(self, speech_pcm: bytes) -> None:
         """Run STT → LangGraph → TTS for one complete caller utterance.
@@ -343,13 +405,16 @@ class LiveKitAudioBridge:
         pipeline_start = time.perf_counter_ns()
         loop = asyncio.get_event_loop()
 
-        # ── STT 
+        # ── STT
         stt_start = time.perf_counter_ns()
         try:
             wav_bytes = pcm_to_wav(speech_pcm, sample_rate=VAD_SAMPLE_RATE)
             stt_result = await loop.run_in_executor(
                 None,
-                lambda: self.stt.transcribe(wav_bytes, language_hint=self._detected_language),
+                lambda: self.stt.transcribe(
+                    wav_bytes,
+                    language_hint=self._detected_language,
+                ),
             )
         except Exception as exc:
             logger.error("[%s] Unexpected STT error: %s", self.session_id, exc)
@@ -361,34 +426,68 @@ class LiveKitAudioBridge:
         if not transcript:
             logger.debug("[%s] Empty transcript — skipping.", self.session_id)
             return
-        
+
         # ── Transcript deduplication
         now = time.monotonic()
-        normalized = transcript.lower().replace("?", "").replace("।", "").replace("!", "").strip()
-        if normalized == self._last_transcript and (now - self._last_transcript_time) < _UTTERANCE_DEDUP_SECONDS:
-            logger.info("[%s] Duplicate transcript '%s' — skipping.", self.session_id, transcript[:40])
+        normalized = (
+            transcript.lower()
+            .replace("?", "")
+            .replace("।", "")
+            .replace("!", "")
+            .strip()
+        )
+        if (
+            normalized == self._last_transcript
+            and (now - self._last_transcript_time) < _UTTERANCE_DEDUP_SECONDS
+        ):
+            logger.info(
+                "[%s] Duplicate transcript '%s' — skipping.",
+                self.session_id,
+                transcript[:40],
+            )
             return
-        
+
         self._last_transcript = normalized
         self._last_transcript_time = now
 
         stt_latency_ms = (time.perf_counter_ns() - stt_start) / 1_000_000
-        record_stt_latency(self.tenant_id, stt_result.get("language_code", "unknown"), stt_latency_ms)
+        record_stt_latency(
+            self.tenant_id,
+            stt_result.get("language_code", "unknown"),
+            stt_latency_ms,
+        )
 
         if stt_result.get("low_confidence"):
             logger.warning(
                 "[%s] Low-confidence transcript (%.2f): %r",
-                self.session_id, stt_result.get("confidence", 0.0), transcript[:60],
+                self.session_id,
+                stt_result.get("confidence", 0.0),
+                transcript[:60],
             )
 
         self._detected_language = lang
         record_language_detection(self.tenant_id, lang, is_code_mixed="+" in lang)
         logger.info(
             "[%s] STT: lang=%s conf=%.2f transcript=%r",
-            self.session_id, lang, stt_result.get("confidence", 0.0), transcript[:80],
+            self.session_id,
+            lang,
+            stt_result.get("confidence", 0.0),
+            transcript[:80],
         )
 
-        # ── LangGraph 
+        self._schedule_transcript_turn(
+            speaker="caller",
+            text=transcript,
+            language=lang,
+            confidence=(
+                float(stt_result["confidence"])
+                if stt_result.get("confidence") is not None
+                else None
+            ),
+            is_escalation=False,
+        )
+
+        # ── LangGraph
         llm_start = time.perf_counter_ns()
         try:
             initial_state = make_initial_state(
@@ -416,26 +515,29 @@ class LiveKitAudioBridge:
             logger.warning("[%s] Empty final_response from graph.", self.session_id)
             raise ValueError("Empty final_response")
 
-        record_ttfr(self.tenant_id, lang, llm_latency_ms)
-
         if is_escalation:
             record_escalation(
-                self.tenant_id, lang,
+                self.tenant_id,
+                lang,
                 pipeline_state.get("escalation_reason") or "emergency",
             )
             logger.warning(
                 "[%s] ESCALATING: reason=%s",
-                self.session_id, pipeline_state.get("escalation_reason"),
+                self.session_id,
+                pipeline_state.get("escalation_reason"),
             )
         else:
             record_safety_cleared(self.tenant_id)
 
-        # ── TTS 
+        # ── TTS
         tts_start = time.perf_counter_ns()
         try:
             tts_wav = await loop.run_in_executor(
                 None,
-                lambda: self.tts.synthesize(final_response, language_code=response_lang),
+                lambda: self.tts.synthesize(
+                    final_response,
+                    language_code=response_lang,
+                ),
             )
         except Exception as exc:
             logger.error("[%s] TTS synthesis failed: %s", self.session_id, exc)
@@ -447,15 +549,30 @@ class LiveKitAudioBridge:
         pipeline_latency_ms = (time.perf_counter_ns() - pipeline_start) / 1_000_000
         record_pipeline_latency(self.tenant_id, lang, pipeline_latency_ms)
 
+        record_ttfr(self.tenant_id, lang, llm_latency_ms)
+
         logger.info(
             "[%s] Pipeline done: lang=%s escalate=%s "
             "stt=%.0fms llm=%.0fms tts=%.0fms total=%.0fms",
-            self.session_id, lang, is_escalation,
-            stt_latency_ms, llm_latency_ms, tts_latency_ms, pipeline_latency_ms,
+            self.session_id,
+            lang,
+            is_escalation,
+            stt_latency_ms,
+            llm_latency_ms,
+            tts_latency_ms,
+            pipeline_latency_ms,
         )
 
         if tts_wav:
             await self._publish_audio(tts_wav)
+
+        self._schedule_transcript_turn(
+            speaker="agent",
+            text=final_response,
+            language=response_lang,
+            confidence=None,
+            is_escalation=is_escalation,
+        )
 
         # End call after escalation — records outcome in Prometheus
         if is_escalation:
@@ -468,20 +585,29 @@ class LiveKitAudioBridge:
             wav_bytes: WAV bytes from Sarvam TTS (PCM 16-bit, 16kHz, mono).
         """
         if not self._audio_source or not wav_bytes:
-            logger.debug("[%s] _publish_audio: no audio source or empty WAV.", self.session_id)
+            logger.debug(
+                "[%s] _publish_audio: no audio source or empty WAV.",
+                self.session_id,
+            )
             return
 
         self._is_speaking = True
         logger.debug(
-            "[%s] Publishing %d WAV bytes to room.", self.session_id, len(wav_bytes)
+            "[%s] Publishing %d WAV bytes to room.",
+            self.session_id,
+            len(wav_bytes),
         )
 
         try:
             frame_count = 0
             for frame_pcm in wav_to_pcm_frames(wav_bytes, frame_duration_ms=20):
                 if self._stop_event.is_set():
-                    logger.debug("[%s] Stop event — aborting audio publish.", self.session_id)
+                    logger.debug(
+                        "[%s] Stop event — aborting audio publish.",
+                        self.session_id,
+                    )
                     break
+
                 samples_per_channel = len(frame_pcm) // 2  # int16 = 2 bytes/sample
                 audio_frame = rtc.AudioFrame(
                     data=frame_pcm,
@@ -491,8 +617,11 @@ class LiveKitAudioBridge:
                 )
                 await self._audio_source.capture_frame(audio_frame)
                 frame_count += 1
+
             logger.debug(
-                "[%s] Published %d audio frames to room.", self.session_id, frame_count
+                "[%s] Published %d audio frames to room.",
+                self.session_id,
+                frame_count,
             )
         except Exception as exc:
             logger.error("[%s] Audio publish error: %s", self.session_id, exc)
@@ -513,9 +642,15 @@ class LiveKitAudioBridge:
             if not greeting:
                 company = cfg.get("company_name", "KoyalAI")
                 if "hi" in lang:
-                    greeting = f"नमस्ते! {company} में आपका स्वागत है। मैं आपकी कैसे मदद कर सकता हूँ?"
+                    greeting = (
+                        f"नमस्ते! {company} में आपका स्वागत है। "
+                        f"मैं आपकी कैसे मदद कर सकता हूँ?"
+                    )
                 else:
-                    greeting = f"Hello! Welcome to {company}. How can I help you today?"
+                    greeting = (
+                        f"Hello! Welcome to {company}. How can I help you today?"
+                    )
+
             loop = asyncio.get_event_loop()
             tts_wav = await loop.run_in_executor(
                 None,
@@ -523,6 +658,13 @@ class LiveKitAudioBridge:
             )
             if tts_wav:
                 await self._publish_audio(tts_wav)
+                self._schedule_transcript_turn(
+                    speaker="agent",
+                    text=greeting,
+                    language=lang,
+                    confidence=None,
+                    is_escalation=False,
+                )
                 logger.info("[%s] Greeting played in %s.", self.session_id, lang)
         except Exception as exc:
             logger.warning("[%s] Greeting failed (non-fatal): %s", self.session_id, exc)
@@ -539,15 +681,92 @@ class LiveKitAudioBridge:
             language: BCP-47 language code (e.g. ``"hi-IN"``).
         """
         apology_text = _APOLOGY.get(language, _APOLOGY[_DEFAULT_APOLOGY_LANG])
+
         loop = asyncio.get_event_loop()
         try:
             apology_audio = await loop.run_in_executor(
-                None, lambda: self.tts.synthesize(apology_text, language_code=language)
+                None,
+                lambda: self.tts.synthesize(apology_text, language_code=language),
             )
             if apology_audio:
                 await self._publish_audio(apology_audio)
-                logger.info(
-                    "[%s] Apology spoken in %s.", self.session_id, language
+                self._schedule_transcript_turn(
+                    speaker="agent",
+                    text=apology_text,
+                    language=language,
+                    confidence=None,
+                    is_escalation=False,
                 )
+                logger.info("[%s] Apology spoken in %s.", self.session_id, language)
         except Exception as exc:
             logger.error("[%s] Apology TTS failed: %s", self.session_id, exc)
+
+    def _schedule_transcript_turn(
+        self,
+        *,
+        speaker: Literal["caller", "agent"],
+        text: str,
+        language: str,
+        confidence: float | None = None,
+        is_escalation: bool = False,
+    ) -> None:
+        """Queue a transcript event without blocking the audio pipeline."""
+        if self._stop_event.is_set():
+            return
+
+        cleaned = text.strip()
+        if not cleaned:
+            return
+
+        try:
+            turn = TranscriptTurn(
+                speaker=speaker,
+                text=cleaned,
+                language=language,
+                timestamp=datetime.now(UTC).isoformat(),
+                confidence=confidence,
+                is_escalation=is_escalation,
+            )
+        except Exception:
+            logger.exception(
+                "[%s] Failed to build transcript event.",
+                self.session_id,
+            )
+            return
+
+        try:
+            self._transcript_queue.put_nowait(turn)
+        except asyncio.QueueFull:
+            logger.warning(
+                "[%s] Transcript queue full — dropping turn for room=%s",
+                self.session_id,
+                self.room.name,
+            )
+
+    async def _transcript_worker(self) -> None:
+        """Sequential, best-effort transcript fan-out worker."""
+        try:
+            while True:
+                item = await self._transcript_queue.get()
+                try:
+                    if item is None:
+                        return
+
+                    await self._transcript_manager.broadcast(self.room.name, item)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception(
+                        "[%s] Transcript broadcast failed for room=%s",
+                        self.session_id,
+                        self.room.name,
+                    )
+                finally:
+                    self._transcript_queue.task_done()
+        except asyncio.CancelledError:
+            logger.debug(
+                "[%s] Transcript worker cancelled for room=%s",
+                self.session_id,
+                self.room.name,
+            )
+            raise

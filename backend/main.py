@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import time
-import uuid
 import asyncio 
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -34,7 +33,7 @@ from backend.observability.prometheus_metrics import PrometheusMiddleware
 from prometheus_client import make_asgi_app, REGISTRY
 from backend.telephony.inbound_handler import router as telephony_router
 from backend.telephony.outbound_dialer import router as outbound_router
-from backend.telephony.outbound_dialer import LiveKitSIPOutbound
+from backend.telephony.transcript_ws import router as transcript_router
 import backend.groq_patch
 
 logger = logging.getLogger(__name__)
@@ -58,48 +57,6 @@ async def _cost_gauge_sync_loop() -> None:
             logger.debug("Cost gauge sync error (non-fatal): %s", exc)
 
 # ── Request / Response models 
-
-class OutboundContact(BaseModel):
-    phone: str
-    name: str
-    model_config = {"extra": "allow"}   # Allow arbitrary template fields
-
-    @field_validator("phone")
-    @classmethod
-    def phone_nonempty(cls, v: str) -> str:
-        if not v or not v.strip():
-            raise ValueError("phone must not be empty")
-        return v.strip()
-
-
-class OutboundCampaignRequest(BaseModel):
-    tenant_id: str
-    contact_list: list[OutboundContact]
-    script_template: str
-    language: str = "hi-IN"
-    max_concurrent: int = 5
-
-    @field_validator("tenant_id")
-    @classmethod
-    def tenant_known(cls, v: str) -> str:
-        if v not in TENANTS:
-            raise ValueError(f"Unknown tenant_id '{v}'. Known: {TENANTS}")
-        return v
-
-    @field_validator("script_template")
-    @classmethod
-    def script_nonempty(cls, v: str) -> str:
-        if not v.strip():
-            raise ValueError("script_template must not be empty")
-        return v
-
-    @field_validator("max_concurrent")
-    @classmethod
-    def concurrent_range(cls, v: int) -> int:
-        if not (1 <= v <= 50):
-            raise ValueError("max_concurrent must be between 1 and 50")
-        return v
-
 
 class HealthResponse(BaseModel):
     status: str
@@ -242,6 +199,7 @@ app.mount("/metrics/", metrics_app)
 
 app.include_router(telephony_router)
 app.include_router(outbound_router)
+app.include_router(transcript_router)
 
 # ── WebSocket endpoint 
 
@@ -267,44 +225,7 @@ async def voice_websocket(websocket: WebSocket, tenant_id: str, session_id: str)
 
 # ── REST endpoints 
 
-@app.post("/api/outbound/campaign", status_code=202)
-async def run_outbound_campaign(request: OutboundCampaignRequest) -> dict:
-    try:
-        async with LiveKitSIPOutbound() as dialer:
-            contact_dicts = [
-                {**c.model_dump(), "tenant_id": request.tenant_id}
-                for c in request.contact_list
-            ]
-            campaign = await dialer.dial_campaign(
-                contacts=contact_dicts,
-                script_template=request.script_template,
-                language=request.language,
-                max_concurrent=request.max_concurrent,
-            )
-
-        return {
-            "campaign_id": str(uuid.uuid4()),
-            "tenant_id": request.tenant_id,
-            "total": campaign.total,
-            "dialing": campaign.dialing,
-            "failed": campaign.failed,
-            "skipped": campaign.skipped,
-            "results": [
-                {
-                    "phone": r.phone,
-                    "status": r.status,
-                    "room_name": r.room_name,
-                    "sip_call_id": r.sip_call_id,
-                    "error": r.error,
-                }
-                for r in campaign.results
-            ],
-        }
-    except Exception as exc:
-        logger.exception("Outbound campaign error: %s", exc)
-        raise HTTPException(status_code=500, detail=f"Campaign failed: {exc}") from exc
-
-@app.get("/api/costs/{tenant_id}")
+@app.get("/api/costs/{tenant_id}") 
 def get_tenant_costs(tenant_id: str) -> dict:
     """Synchronous endpoint — uses sync Redis read; no event-loop overhead."""
     if tenant_id not in TENANTS:
